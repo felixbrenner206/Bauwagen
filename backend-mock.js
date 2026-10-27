@@ -79,6 +79,28 @@ export function saveItem(fields, id) {
 
 export function getBookings() { return s.bookings.slice(); }
 
+// Meta (Einstellungen + Push-Zustand) separat gespeichert, damit mehrere Tabs dieselben Werte sehen (Dedupe-Test)
+const MKEY = 'bwz.demo.meta';
+const readMeta = () => { try { return JSON.parse(localStorage.getItem(MKEY)) || { settings: {}, alerts: {} }; } catch (e) { return { settings: {}, alerts: {} }; } };
+let settingsCb;
+export function subscribeSettings(cb) { settingsCb = cb; cb(readMeta().settings); }
+export function saveSettings(data) {
+  const m = readMeta(); m.settings = { ...m.settings, ...data };
+  localStorage.setItem(MKEY, JSON.stringify(m)); settingsCb && settingsCb(m.settings);
+}
+export async function updateAlerts(mutator) {
+  if (!online) throw new Error('offline');
+  const m = readMeta();
+  const res = mutator(m.alerts || {});
+  if (!res) return null;
+  m.alerts = res.data; localStorage.setItem(MKEY, JSON.stringify(m));
+  return res.result;
+}
+export function logPush(msg) {
+  const log = JSON.parse(localStorage.getItem('bwz.demo.pushlog') || '[]');
+  log.push({ ...msg, ts: Date.now() }); localStorage.setItem('bwz.demo.pushlog', JSON.stringify(log));
+}
+
 function seed() {
   const mk = (o) => ({ id: uid(), archived: false, sizeL: null, perCase: null, packSize: null, targetStock: null, ...o });
   s.items = [

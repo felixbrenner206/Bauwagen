@@ -10,7 +10,7 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, onSnapshot, query, where, orderBy, limit,
-  writeBatch, increment, serverTimestamp, setDoc, updateDoc, getDocFromServer
+  writeBatch, increment, serverTimestamp, setDoc, updateDoc, getDocFromServer, runTransaction
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import { firebaseConfig } from './config.js';
 
@@ -125,4 +125,27 @@ export function saveItem(fields, id) {
   setDoc(ref, { ...clean, stock: 0, archived: false, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
     .catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Anlegen abgelehnt: ' + (err.code || err.message) })));
   return ref.id;
+}
+
+// ---------- Einstellungen (ntfy-Kanal) – liegt in Firestore, nicht im öffentlichen Repo ----------
+export function subscribeSettings(cb) {
+  onSnapshot(doc(db, 'meta', 'settings'), (snap) => cb(snap.exists() ? snap.data() : {}), (e) => console.error(e));
+}
+export function saveSettings(data) {
+  setDoc(doc(db, 'meta', 'settings'), data, { merge: true })
+    .catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Einstellungen abgelehnt: ' + (err.code || err.message) })));
+}
+
+// ---------- Push-Zustand: Transaktion sorgt dafür, dass nur EIN Gerät eine Meldung "gewinnt" ----------
+// mutator(aktuellerZustand) → null (nichts zu tun) oder { data: neuerZustand, result }
+// Läuft nur online (Transaktionen brauchen den Server) – wird von der App nur im Zustand "Synchron" aufgerufen.
+export async function updateAlerts(mutator) {
+  return runTransaction(db, async (tx) => {
+    const ref = doc(db, 'meta', 'alerts');
+    const snap = await tx.get(ref);
+    const res = mutator(snap.exists() ? snap.data() : {});
+    if (!res) return null;
+    tx.set(ref, res.data);
+    return res.result;
+  });
 }

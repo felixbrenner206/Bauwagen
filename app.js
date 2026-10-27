@@ -1,4 +1,4 @@
-// Bauwagen-Zähler – Etappe 1: Bestand, Austragen, Einkauf, Inventur, Artikelverwaltung, Offline-Sync
+// Bauwagen-Zähler – Etappe 1+2: Bestand, Austragen, Einkauf, Inventur, Artikel, Offline-Sync, Einkaufsliste, Push (ntfy)
 const PARAMS = new URLSearchParams(location.search);
 const DEMO = PARAMS.has('demo');
 const IMPORT = PARAMS.has('import');
@@ -12,6 +12,8 @@ const state = {
   lastSync: Number(localStorage.getItem('bwz.lastSync')) || 0,
   view: 'stock', search: '', showArchived: false,
   cart: {},          // Einkauf: { itemId: { big, small } }
+  settings: {},      // { ntfyTopic }
+  shopChecked: new Set(JSON.parse(localStorage.getItem('bwz.shopChecked') || '[]')),
   error: ''
 };
 
@@ -21,7 +23,15 @@ const bigSize = (it) => (isDrink(it) ? Number(it.perCase) : Number(it.packSize))
 const bigWord = (it, n) => isDrink(it) ? (n === 1 ? 'Kasten' : 'Kästen') : (n === 1 ? 'Packung' : 'Packungen');
 const smallWord = (it, n) => isDrink(it) ? (n === 1 ? 'Flasche' : 'Flaschen') : 'Stück';
 const title = (it) => (isDrink(it) && it.sizeL ? `${it.name}\u00a0${fmt(it.sizeL, 3)}\u00a0L` : it.name);  // geschützte Leerzeichen: Gebinde bricht nicht um
-const below = (it) => typeof it.minStock === 'number' && it.stock < it.minStock;
+const below = (it) => typeof it.minStock === 'number' && it.minStock > 0 && it.stock < it.minStock;
+// Einkaufsvorschlag (Lastenheft Rev. 2): Fehlmenge bis Mindestbestand, bei Kasten-Artikeln auf volle Kästen aufgerundet
+function suggestion(it) {
+  const missing = it.minStock - it.stock;
+  if (missing <= 0) return 0;
+  const b = isDrink(it) ? bigSize(it) : 0;
+  return b > 0 ? Math.ceil(missing / b) * b : missing;
+}
+const plain = (t) => String(t).replace(/\u00a0/g, ' ');
 
 function qtyText(it, n) {
   const b = bigSize(it);
@@ -100,6 +110,7 @@ function run() {
     <nav class="tabs">
       <button data-view="stock">Bestand</button>
       <button data-view="buy">Einkauf</button>
+      <button data-view="list">Liste<span class="tab-badge" id="listBadge" hidden></span></button>
       <button data-view="items">Artikel</button>
     </nav>
     <div class="snack" id="snack" hidden><span id="snackText"></span><button id="snackUndo" type="button">Rückgängig</button></div>
@@ -111,6 +122,7 @@ function run() {
   };
   window.addEventListener('bwz-error', (e) => showError(e.detail));
   backend.subscribe(onData, showError);
+  backend.subscribeSettings((st) => { state.settings = st || {}; scheduleAlerts(); });
   setInterval(renderSync, 20000);
   render();
 }
@@ -122,6 +134,7 @@ function onData({ items, pending, connected }) {
   if (connected) { state.lastSync = Date.now(); localStorage.setItem('bwz.lastSync', state.lastSync); }
   render();
   if ($('#sheet').open && $('#sheet').dataset.item) refreshSheetHeader();
+  scheduleAlerts();
 }
 
 function showError(msg) {
@@ -158,8 +171,12 @@ function render() {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.view === state.view));
   const v = $('#view'); if (!v) return;
   if (state.view !== 'buy') delete v.dataset.buyKey;
+  const lowCount = active().filter(below).length;
+  const badge = $('#listBadge');
+  if (badge) { badge.hidden = !lowCount; badge.textContent = lowCount; }
   if (state.view === 'stock') renderStock(v);
   else if (state.view === 'buy') renderBuy(v);
+  else if (state.view === 'list') renderList(v);
   else renderItems(v);
 }
 
@@ -398,10 +415,14 @@ function submitBuy() {
 // ---------- Artikelverwaltung ----------
 function renderItems(v) {
   const list = state.items.filter(i => state.showArchived || !i.archived);
+  const noMin = active().filter(i => !(i.minStock > 0)).length;
   let html = `<div class="items-head">
       <button class="btn primary" type="button" id="newItem">+ Neuer Artikel</button>
-      <label class="chk"><input type="checkbox" id="showArch" ${state.showArchived ? 'checked' : ''}> Archivierte zeigen</label>
-    </div>`;
+      <button class="btn" type="button" id="minBulk">Mindestbestände</button>
+      <button class="btn" type="button" id="pushSet">Push ${state.settings.ntfyTopic ? '✓' : '⚠︎'}</button>
+    </div>
+    ${noMin ? `<p class="hint">${noMin} Artikel ohne Mindestbestand – die erscheinen nie auf der Einkaufsliste.</p>` : ''}
+    <label class="chk" style="margin-top:10px"><input type="checkbox" id="showArch" ${state.showArchived ? 'checked' : ''}> Archivierte zeigen</label>`;
   if (!list.length) html += `<p class="empty">Keine Artikel.</p>`;
   for (const [cat, its] of groupByCat(list)) {
     html += `<h2 class="cat">${esc(cat)}</h2>`;
@@ -409,7 +430,7 @@ function renderItems(v) {
       const meta = isDrink(it)
         ? [it.sizeL ? `${fmt(it.sizeL, 3)} L/Fl.` : null, it.perCase ? `${it.perCase} Fl./Kasten` : null]
         : ['Stück', it.packSize ? `${it.packSize}/Packung` : null];
-      meta.push(`Min ${it.minStock ?? '–'}`, it.targetStock ? `Soll ${it.targetStock}` : null);
+      meta.push(it.minStock > 0 ? `Min ${qtyText(it, it.minStock)}` : 'kein Mindestbestand');
       html += `<button class="item-row ${it.archived ? 'arch' : ''}" type="button" data-edit="${esc(it.id)}">
         <span>${esc(title(it))}${it.archived ? ' <i>(archiviert)</i>' : ''}</span>
         <small>${esc(meta.filter(Boolean).join(' · '))}</small></button>`;
@@ -417,12 +438,14 @@ function renderItems(v) {
   }
   v.innerHTML = html;
   $('#newItem').onclick = () => openItemForm(null);
+  $('#minBulk').onclick = openMinBulk;
+  $('#pushSet').onclick = openSettings;
   $('#showArch').onchange = (e) => { state.showArchived = e.target.checked; render(); };
   v.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openItemForm(b.dataset.edit));
 }
 
 function openItemForm(id) {
-  const it = id ? getItem(id) : { type: 'drink', category: '', name: '', sizeL: 0.5, perCase: 20, packSize: null, minStock: 0, targetStock: null };
+  const it = id ? getItem(id) : { type: 'drink', category: '', name: '', sizeL: 0.5, perCase: 20, packSize: null, minStock: 0 };
   const cats = [...new Set(state.items.map(i => i.category).filter(Boolean)), 'Bier', 'Softdrinks', 'Schnaps', 'Verbrauchsmaterial']
     .filter((c, i, a) => a.indexOf(c) === i);
   const d = $('#sheet');
@@ -443,10 +466,7 @@ function openItemForm(id) {
     <div class="grid2 only-piece">
       <label>Stück pro Packung (optional)<input name="packSize" type="number" inputmode="numeric" min="0" value="${it.packSize ?? ''}"></label>
     </div>
-    <div class="grid2">
-      <label>Mindestbestand <span class="unit"></span><input name="minStock" type="number" inputmode="numeric" min="0" value="${it.minStock ?? 0}" required></label>
-      <label>Sollbestand <span class="unit"></span><input name="targetStock" type="number" inputmode="numeric" min="0" value="${it.targetStock ?? ''}" placeholder="optional"></label>
-    </div>
+    <label>Mindestbestand <span class="unit"></span> – darunter muss eingekauft werden<input name="minStock" type="number" inputmode="numeric" min="0" value="${it.minStock ?? 0}" required></label>
     ${id ? '' : `<label>Anfangsbestand <span class="unit"></span><input name="initial" type="number" inputmode="numeric" min="0" value="0"></label>`}
     <p class="err" id="formErr"></p>
     <button class="btn primary big" type="submit">Speichern</button>
@@ -476,10 +496,9 @@ function openItemForm(id) {
       sizeL: type === 'drink' ? num('sizeL') : null,
       perCase: type === 'drink' ? num('perCase') : null,
       packSize: type === 'piece' ? num('packSize') : null,
-      minStock: num('minStock') ?? 0,
-      targetStock: num('targetStock')
+      minStock: Math.round(num('minStock') ?? 0)
     };
-    for (const k of ['sizeL', 'perCase', 'packSize', 'minStock', 'targetStock']) {
+    for (const k of ['sizeL', 'perCase', 'packSize', 'minStock']) {
       if (data[k] !== null && (!isFinite(data[k]) || data[k] < 0)) { $('#formErr').textContent = 'Ungültige Zahl.'; return; }
       if (data[k] === 0 && k !== 'minStock') data[k] = null;
     }
@@ -493,6 +512,205 @@ function openItemForm(id) {
   };
   d.onclick = (e) => { if (e.target === d) d.close(); };
   if (!d.open) d.showModal();
+}
+
+// ---------- Einkaufsliste ----------
+function saveChecked() { localStorage.setItem('bwz.shopChecked', JSON.stringify([...state.shopChecked])); }
+function lowItems() { return active().filter(below); }
+
+function renderList(v) {
+  const low = lowItems();
+  // Abhaken aufräumen: Artikel, die nicht mehr auf der Liste stehen, verlieren ihr Häkchen
+  const lowIds = new Set(low.map(i => i.id));
+  let dirty = false;
+  for (const id of state.shopChecked) if (!lowIds.has(id)) { state.shopChecked.delete(id); dirty = true; }
+  if (dirty) saveChecked();
+
+  const noMin = active().filter(i => !(i.minStock > 0)).length;
+  if (!low.length) {
+    v.innerHTML = `<p class="empty">✓ Alles über Mindestbestand.</p>` +
+      (noMin ? `<p class="hint" style="text-align:center">${noMin} Artikel haben noch keinen Mindestbestand.<br><button class="btn" type="button" id="goMin" style="margin-top:8px">Mindestbestände eintragen</button></p>` : '');
+    if (noMin) $('#goMin').onclick = openMinBulk;
+    return;
+  }
+  let html = `<div class="list-head"><span class="hint">${low.length} Artikel unter Mindestbestand</span>
+    <button class="btn" type="button" id="shareList">Teilen</button></div>`;
+  for (const [cat, its] of groupByCat(low)) {
+    html += `<h2 class="cat">${esc(cat)}</h2>`;
+    for (const it of its) {
+      const on = state.shopChecked.has(it.id);
+      html += `<button class="shop-row ${on ? 'on' : ''}" type="button" data-check="${esc(it.id)}">
+        <span class="box">${on ? '✓' : ''}</span>
+        <span class="shop-main"><span class="name">${esc(title(it))}</span>
+          <small>Bestand ${esc(qtyText(it, Math.max(0, it.stock)))} · Min ${esc(qtyText(it, it.minStock))}</small></span>
+        <b class="shop-qty">${esc(qtyText(it, suggestion(it)))}</b>
+      </button>`;
+    }
+  }
+  const n = low.filter(i => state.shopChecked.has(i.id)).length;
+  html += `<p class="hint">Abhaken beim Einkaufen. Gekauft = Vorschlag? Dann unten buchen. Andere Mengen über <b>Einkauf</b> eintragen.</p>
+    <div class="buy-bar"><span>${n ? `${n} abgehakt` : 'Nichts abgehakt'}</span>
+    <button class="btn primary" type="button" id="listBook" ${n ? '' : 'disabled'}>Als Einkauf buchen</button></div>`;
+  v.innerHTML = html;
+  v.querySelectorAll('[data-check]').forEach(b => b.onclick = () => {
+    const id = b.dataset.check;
+    state.shopChecked.has(id) ? state.shopChecked.delete(id) : state.shopChecked.add(id);
+    saveChecked(); render();
+  });
+  $('#listBook').onclick = () => {
+    const entries = low.filter(i => state.shopChecked.has(i.id)).map(i => ({ itemId: i.id, delta: suggestion(i), kind: 'in' }));
+    entries.forEach(e => state.shopChecked.delete(e.itemId)); saveChecked();
+    doBook(entries, `Einkauf gebucht (${entries.length} Artikel)`);
+  };
+  $('#shareList').onclick = shareList;
+}
+
+function listText(items) {
+  return items.map(i => `• ${plain(title(i))}: ${qtyText(i, suggestion(i))}`).join('\n');
+}
+async function shareList() {
+  const text = 'Einkaufsliste Bauwagen\n' + listText(lowItems());
+  try {
+    if (navigator.share) await navigator.share({ text });
+    else { await navigator.clipboard.writeText(text); showSnack('Liste kopiert', null); }
+  } catch (e) { /* Teilen abgebrochen */ }
+}
+
+// ---------- Mindestbestände schnell eintragen ----------
+function openMinBulk() {
+  const d = $('#sheet');
+  delete d.dataset.item;
+  let html = `<div class="sheet-head"><div><h3>Mindestbestände</h3><div class="sheet-stock">Fällt der Bestand darunter, kommt der Artikel auf die Einkaufsliste.</div></div>
+    <button class="x" type="button" data-close>✕</button></div>`;
+  for (const [cat, its] of groupByCat(active())) {
+    html += `<h2 class="cat">${esc(cat)}</h2>`;
+    for (const it of its) {
+      const b = bigSize(it), m = it.minStock > 0 ? it.minStock : 0;
+      html += `<div class="min-row" data-id="${esc(it.id)}"><div class="buy-name">${esc(title(it))}<small>Bestand ${esc(qtyText(it, Math.max(0, it.stock)))}</small></div>
+        <div class="buy-steps">${b > 0 ? stepper('big', bigWord(it, 2), Math.floor(m / b)) : ''}${stepper('small', smallWord(it, 2), b > 0 ? m % b : m)}</div></div>`;
+    }
+  }
+  html += `<div class="sheet-bar"><button class="btn primary big" type="button" id="minSave">Speichern</button></div>`;
+  d.innerHTML = html;
+  d.querySelectorAll('.min-row').forEach(r => wireSteppers(r, () => r.classList.add('has')));
+  d.querySelector('[data-close]').onclick = () => d.close();
+  $('#minSave').onclick = () => {
+    let n = 0;
+    d.querySelectorAll('.min-row').forEach(r => {
+      const it = getItem(r.dataset.id); if (!it) return;
+      const val = readStep(r, 'big') * bigSize(it) + readStep(r, 'small');
+      if (val !== (it.minStock || 0)) { backend.saveItem({ minStock: val }, it.id); n++; }
+    });
+    d.close();
+    showSnack(n ? `${n} Mindestbestände gespeichert` : 'Nichts geändert', null);
+  };
+  d.onclick = (e) => { if (e.target === d) d.close(); };
+  if (!d.open) d.showModal();
+}
+
+// ---------- Push-Einstellungen ----------
+function randomTopic() {
+  const a = 'abcdefghjkmnpqrstuvwxyz23456789';
+  let r = ''; const buf = crypto.getRandomValues(new Uint8Array(10));
+  for (const x of buf) r += a[x % a.length];
+  return 'bauwagen-' + r;
+}
+function openSettings() {
+  const d = $('#sheet');
+  delete d.dataset.item;
+  const cur = state.settings.ntfyTopic || '';
+  d.innerHTML = `<form class="form" id="setForm">
+    <div class="sheet-head"><h3>Push über ntfy</h3><button class="x" type="button" data-close>✕</button></div>
+    <p class="hint">Meldet sofort, wenn ein Artikel unter den Mindestbestand fällt, und einmal im Monat die ganze Einkaufsliste. Gilt für alle Handys der Gruppe.</p>
+    <label>Kanalname (wie ein Passwort – nicht öffentlich posten)
+      <input name="topic" value="${esc(cur)}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="bauwagen-…" pattern="[A-Za-z0-9_\\-]{6,64}"></label>
+    <button class="btn" type="button" id="genTopic">Zufälligen Namen erzeugen</button>
+    <ol class="hint steps-list">
+      <li>Namen erzeugen → <b>Speichern</b></li>
+      <li>ntfy-App öffnen → <b>+</b> → genau diesen Kanalnamen eintragen → Abonnieren</li>
+      <li>Hier <b>Testnachricht</b> senden</li>
+      <li>Kanalnamen an die anderen weitergeben (die abonnieren ihn in ihrer ntfy-App)</li>
+    </ol>
+    <p class="err" id="setErr"></p>
+    <button class="btn primary big" type="submit">Speichern</button>
+    <button class="btn" type="button" id="testPush" ${cur ? '' : 'disabled'}>Testnachricht senden</button>
+  </form>`;
+  const f = $('#setForm');
+  f.querySelector('[data-close]').onclick = () => d.close();
+  $('#genTopic').onclick = () => { f.topic.value = randomTopic(); };
+  $('#testPush').onclick = async () => {
+    const ok = await sendPush('Bauwagen: Test', 'Push funktioniert ✓', 'white_check_mark');
+    showSnack(ok ? 'Testnachricht gesendet' : 'Senden fehlgeschlagen (Internet?)', null);
+  };
+  f.onsubmit = (ev) => {
+    ev.preventDefault();
+    const t = f.topic.value.trim();
+    if (t && !/^[A-Za-z0-9_-]{6,64}$/.test(t)) { $('#setErr').textContent = 'Nur Buchstaben, Zahlen, - und _ (6–64 Zeichen).'; return; }
+    backend.saveSettings({ ntfyTopic: t });
+    state.settings = { ...state.settings, ntfyTopic: t };
+    $('#testPush').disabled = !t;
+    showSnack('Gespeichert', null);
+    render();
+  };
+  d.onclick = (e) => { if (e.target === d) d.close(); };
+  if (!d.open) d.showModal();
+}
+
+// ---------- Push-Logik ----------
+// Läuft auf jedem Handy, aber nur im Zustand "Synchron" (Bestand ist dann vom Server bestätigt).
+// Wer meldet, entscheidet eine Firestore-Transaktion auf meta/alerts → jede Meldung geht genau einmal raus.
+async function sendPush(titleText, body, tags) {
+  const topic = state.settings.ntfyTopic;
+  if (!topic) return false;
+  if (DEMO) { backend.logPush({ topic, title: titleText, body }); showSnack('📣 ' + titleText, null); return true; }
+  try {
+    const url = `https://ntfy.sh/${encodeURIComponent(topic)}?title=${encodeURIComponent(titleText)}&tags=${encodeURIComponent(tags || '')}`;
+    const res = await fetch(url, { method: 'POST', body });
+    return res.ok;
+  } catch (e) { console.warn('ntfy', e); return false; }
+}
+
+function monthKey(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; }
+const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+
+let alertTimer, alertBusy = false;
+function scheduleAlerts() { clearTimeout(alertTimer); alertTimer = setTimeout(checkAlerts, 2500); }
+async function checkAlerts() {
+  if (alertBusy || !state.connected || !state.settings.ntfyTopic || !state.items.length) return;
+  alertBusy = true;
+  try {
+    const lowIds = new Set(lowItems().map(i => i.id));
+    const month = monthKey();
+    const res = await backend.updateAlerts((cur) => {
+      const alerted = { ...(cur.alerted || {}) };
+      const newly = []; let changed = false, monthly = false;
+      for (const id of lowIds) if (!alerted[id]) { alerted[id] = true; newly.push(id); changed = true; }
+      for (const id of Object.keys(alerted)) if (!lowIds.has(id)) { delete alerted[id]; changed = true; }   // wieder aufgefüllt → darf erneut melden
+      let lastMonthly = cur.lastMonthly;
+      if (!lastMonthly) { lastMonthly = month; changed = true; }          // erster Lauf: Monatsmeldung ab nächstem Monat
+      else if (lastMonthly !== month) { lastMonthly = month; monthly = true; changed = true; }
+      if (!changed) return null;
+      return { data: { alerted, lastMonthly }, result: { newly, monthly } };
+    });
+    if (!res) return;
+    if (res.newly.length) {
+      const its = res.newly.map(getItem).filter(Boolean);
+      if (its.length === 1) {
+        const it = its[0];
+        await sendPush(`Bauwagen: ${plain(title(it))} unter Mindestbestand`,
+          `Noch ${qtyText(it, Math.max(0, it.stock))} (Min ${qtyText(it, it.minStock)}).\nEinkaufen: ${qtyText(it, suggestion(it))}`, 'beer');
+      } else if (its.length > 1) {
+        await sendPush(`Bauwagen: ${its.length} Artikel unter Mindestbestand`, listText(its), 'beer');
+      }
+    }
+    if (res.monthly) {
+      const low = lowItems();
+      const [y, m] = month.split('-');
+      await sendPush(`Bauwagen: Einkaufsliste ${MONTHS[Number(m) - 1]} ${y}`,
+        low.length ? listText(low) : 'Alles über Mindestbestand ✓', 'clipboard');
+    }
+  } catch (e) { console.warn('Push-Check', e); }
+  finally { alertBusy = false; }
 }
 
 // ---------- Einmaliger Import (…/?import) ----------
