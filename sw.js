@@ -2,7 +2,7 @@
 // Eigene Dateien: "stale-while-revalidate" → sofort aus dem Cache, im Hintergrund aktualisieren
 //   (neue Version ist beim übernächsten Öffnen aktiv). Bei jedem Update VERSION hochzählen.
 // Firebase-Bibliothek (gstatic.com): cache-first, die Dateien sind versioniert und ändern sich nie.
-const VERSION = 'bwz-v7';
+const VERSION = 'bwz-v8';
 const FB = '12.19.0';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './config.js',

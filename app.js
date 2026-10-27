@@ -1053,7 +1053,11 @@ function openSettings() {
     <h4 class="set-h">Admin</h4>
     <button class="btn" type="button" id="setPush">Push über ntfy ${state.settings.ntfyTopic ? '✓' : '⚠︎ nicht eingerichtet'}</button>
     <button class="btn" type="button" id="setDevices">Geräte verwalten</button>
-    <p class="hint">Stornieren alter Buchungen: Statistik → Verlauf.</p>` : `
+    <p class="hint">Stornieren alter Buchungen: Statistik → Verlauf.</p>
+    <details class="admin-re"><summary>Admin-Code neu eingeben</summary>
+      <p class="hint">Nötig, wenn der Admin-Code in den Firestore-Regeln geändert wurde (Fehler „permission-denied“).</p>
+      <div class="admin-row"><input id="setAdminCode" type="password" autocomplete="off" placeholder="Admin-Code"><button class="btn" type="button" id="setAdminGo">Übernehmen</button></div>
+      <p class="err" id="setErr"></p></details>` : `
     <h4 class="set-h">Admin-Modus</h4>
     <div class="admin-row"><input id="setAdminCode" type="password" autocomplete="off" placeholder="Admin-Code"><button class="btn" type="button" id="setAdminGo">Aktivieren</button></div>
     <p class="err" id="setErr"></p>`}
@@ -1073,7 +1077,8 @@ function openSettings() {
   if (admin) {
     $('#setPush').onclick = openPushSettings;
     $('#setDevices').onclick = openDevices;
-  } else {
+  }
+  {
     $('#setAdminGo').onclick = async () => {
       const btn = $('#setAdminGo'); btn.disabled = true;
       try { await backend.upgradeAdmin($('#setAdminCode').value); showSnack('Admin-Modus aktiv', null); openSettings(); }
@@ -1091,7 +1096,12 @@ async function openDevices() {
   d.querySelector('[data-close]').onclick = () => d.close();
   let list;
   try { list = await backend.listMembers(); }
-  catch (e) { $('#devList').innerHTML = `<p class="err">Geräteliste nicht ladbar (Internet?): ${esc(e.code || e.message)}</p>`; return; }
+  catch (e) {
+    $('#devList').innerHTML = e.code === 'permission-denied'
+      ? `<p class="err">Der Server erkennt dich nicht als Admin – dein gespeicherter Admin-Code passt nicht zu den Firestore-Regeln.</p><p class="hint">⚙︎ → „Admin-Code neu eingeben“ mit dem Code aus den Regeln.</p>`
+      : `<p class="err">Geräteliste nicht ladbar (Internet?): ${esc(e.code || e.message)}</p>`;
+    return;
+  }
   list.sort((a, b) => (b.uid === state.me.uid) - (a.uid === state.me.uid) || (b.lastSeen - a.lastSeen));
   const draw = () => {
     $('#devList').innerHTML = list.map(m => `<div class="dev-row ${m.blocked ? 'blocked' : ''}">

@@ -257,3 +257,6 @@ select { font: inherit; color: var(--text); background: var(--card); border: 1px
 .tour-btns .btn.primary { flex: 1; max-width: 220px; margin-left: auto; padding: 14px; }
 
 .who { color: var(--accent); font-weight: 600; }
+
+.admin-re summary { color: var(--muted); font-size: 14px; padding: 6px 0; cursor: pointer; }
+.admin-re[open] { display: grid; gap: 8px; }
