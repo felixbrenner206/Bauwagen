@@ -149,7 +149,7 @@ export function book(entries) {
   for (const e of entries) {
     const bRef = doc(collection(db, 'bookings'));
     ids.push(bRef.id);
-    const data = { itemId: e.itemId, delta: e.delta, kind: e.kind, clientTs: now, ts: serverTimestamp() };
+    const data = { itemId: e.itemId, delta: e.delta, kind: e.kind, clientTs: now, ts: serverTimestamp(), by: uid };   // by: Geräte-ID, Name sieht nur der Admin
     if (e.target !== undefined) data.target = e.target;
     if (e.ref !== undefined) data.ref = e.ref;
     batch.set(bRef, data);
@@ -167,12 +167,12 @@ export function saveItem(fields, id) {
   const clean = { ...fields };
   delete clean.stock; delete clean.id;
   if (id) {
-    updateDoc(doc(db, 'items', id), { ...clean, updatedAt: serverTimestamp() })
+    updateDoc(doc(db, 'items', id), { ...clean, updatedAt: serverTimestamp(), updatedBy: uid })
       .catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Speichern abgelehnt: ' + (err.code || err.message) })));
     return id;
   }
   const ref = doc(collection(db, 'items'));
-  setDoc(ref, { ...clean, stock: 0, archived: false, createdAt: serverTimestamp(), updatedAt: serverTimestamp() })
+  setDoc(ref, { ...clean, stock: 0, archived: false, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: uid })
     .catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Anlegen abgelehnt: ' + (err.code || err.message) })));
   return ref.id;
 }
@@ -206,9 +206,9 @@ export function saveCount(label, counted, entries) {
   const batch = writeBatch(db);
   const cRef = doc(collection(db, 'counts'));
   const now = Date.now();
-  batch.set(cRef, { label, counted, clientTs: now, ts: serverTimestamp() });
+  batch.set(cRef, { label, counted, clientTs: now, ts: serverTimestamp(), by: uid });
   for (const e of entries) {
-    batch.set(doc(collection(db, 'bookings')), { itemId: e.itemId, delta: e.delta, kind: 'correction', target: e.target, session: cRef.id, clientTs: now, ts: serverTimestamp() });
+    batch.set(doc(collection(db, 'bookings')), { itemId: e.itemId, delta: e.delta, kind: 'correction', target: e.target, session: cRef.id, clientTs: now, ts: serverTimestamp(), by: uid });
     batch.update(doc(db, 'items', e.itemId), { stock: increment(e.delta), updatedAt: serverTimestamp() });
   }
   batch.commit().catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Bestandsaufnahme abgelehnt: ' + (err.code || err.message) })));

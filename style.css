@@ -255,3 +255,5 @@ select { font: inherit; color: var(--text); background: var(--card); border: 1px
 .tour-btns { display: flex; justify-content: space-between; gap: 10px; }
 .tour-btns .btn.link { width: auto; }
 .tour-btns .btn.primary { flex: 1; max-width: 220px; margin-left: auto; padding: 14px; }
+
+.who { color: var(--accent); font-weight: 600; }

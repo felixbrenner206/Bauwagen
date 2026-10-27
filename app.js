@@ -104,16 +104,18 @@ function showJoin() {
       <h1>Bauwagen-Zähler</h1>
       <p>Code eingeben (einmalig pro Handy, braucht Internet).</p>
       <input id="joinCode" type="password" autocomplete="off" autocapitalize="off" placeholder="Code" required>
-      <input id="joinName" maxlength="30" autocomplete="off" placeholder="Name des Handys (optional, z. B. „Max iPhone“)">
-      <p class="hint">Der Name ist nur für den Admin in der Geräteliste sichtbar. Buchungen bleiben anonym.</p>
+      <input id="joinName" maxlength="30" minlength="2" autocomplete="off" placeholder="Dein Name (z. B. Max)" required>
+      <p class="hint">Dein Name ist nur für den Admin sichtbar. Für die anderen bleiben Buchungen anonym; der Admin sieht, von welchem Handy eine Buchung kam – damit Fehlbuchungen geklärt werden können.</p>
       <button class="btn primary big" type="submit">Beitreten</button>
       <p class="err" id="joinErr"></p>
     </form>`;
   $('#joinForm').onsubmit = async (ev) => {
     ev.preventDefault();
     const btn = $('#joinForm button'); btn.disabled = true; btn.textContent = 'Prüfe …';
+    const nm = $('#joinName').value.trim();
+    if (nm.length < 2) { $('#joinErr').textContent = 'Bitte Namen eingeben.'; btn.disabled = false; btn.textContent = 'Beitreten'; return; }
     try {
-      await backend.join($('#joinCode').value, $('#joinName').value);
+      await backend.join($('#joinCode').value, nm);
       localStorage.setItem('bwz.joinedAt', Date.now());
       localStorage.removeItem('bwz.tourDone');
       next();
@@ -148,7 +150,11 @@ function run() {
   window.addEventListener('bwz-error', (e) => showError(e.detail));
   backend.subscribe(onData, showError);
   backend.subscribeSettings((st) => { state.settings = st || {}; scheduleAlerts(); });
-  backend.subscribeMe((me) => { state.me = me || {}; $('#adminChip').hidden = !isAdmin(); render(); });
+  backend.subscribeMe((me) => {
+    state.me = me || {}; $('#adminChip').hidden = !isAdmin(); render();
+    // Geräte, die vor der Namens-Pflicht beigetreten sind: einmal nach dem Namen fragen
+    if (me && me.role && !String(me.name || '').trim() && !$('#sheet').open) askName();
+  });
   backend.touchLastSeen();
   $('#gear').onclick = openSettings;
   // Geräte, die schon vor der Hilfe-Funktion beigetreten sind: 4 Wochen Hinweise ab jetzt, aber keine Tour
@@ -814,7 +820,13 @@ const partyName = (p) => { const n = (p.after || p.before).label.split(':').slic
 async function loadStats() {
   const st = state.stats;
   st.loading = true; st.err = ''; render();
-  try { st.data = await backend.fetchHistory(); st.sel = null; }
+  try {
+    st.data = await backend.fetchHistory(); st.sel = null;
+    st.names = {};
+    if (isAdmin()) {      // Admin: Geräte-ID → Name für den Verlauf
+      try { (await backend.listMembers()).forEach(m => { st.names[m.uid] = m.name || 'Unbenannt'; }); } catch (e) { /* offline */ }
+    }
+  }
   catch (e) { console.error(e); st.err = 'Konnte Verlauf nicht laden: ' + (e.code || e.message); }
   st.loading = false; render();
 }
@@ -885,15 +897,16 @@ function statsLog() {
     ...data.counts.map(c => ({ ts: c.clientTs, c }))
   ].sort((a, b) => b.ts - a.ts).slice(0, 150);
   if (!rows.length) return '<p class="empty">Noch keine Buchungen.</p>';
-  const html = `${admin ? '<p class="hint">Admin: Fehlbuchungen mit <b>Storno</b> rückgängig machen. Storno ist selbst eine Buchung – nichts wird gelöscht.</p>' : ''}<div class="log">${rows.map(r => {
+  const who = (x) => admin && x.by ? ` · <span class="who">${esc(state.stats.names?.[x.by] || 'unbekannt')}</span>` : '';
+  const html = `${admin ? '<p class="hint">Admin: Namen sind nur für dich sichtbar. Fehlbuchungen mit <b>Storno</b> rückgängig machen – Storno ist selbst eine Buchung, nichts wird gelöscht.</p>' : ''}<div class="log">${rows.map(r => {
     if (r.c) {
       const can = admin && !r.c.canceled;
-      return `<div class="log-row count ${r.c.canceled ? 'gone' : ''}"><small>${dTime(r.ts)}</small><span>📋 ${esc(r.c.label)}${r.c.canceled ? '<em>storniert</em>' : ''}</span>
+      return `<div class="log-row count ${r.c.canceled ? 'gone' : ''}"><small>${dTime(r.ts)}</small><span>📋 ${esc(r.c.label)}<em>${r.c.canceled ? 'storniert' : ''}${who(r.c)}</em></span>
         ${can ? `<button class="btn mini" type="button" data-storno-count="${esc(r.c.id)}">Storno</button>` : ''}</div>`;
     }
     const it = getItem(r.b.itemId), d = r.b.delta, gone = undone.has(r.b.id);
     const can = admin && !gone && r.b.kind !== 'undo' && !r.b.session;
-    return `<div class="log-row ${gone ? 'gone' : ''}"><small>${dTime(r.ts)}</small><span>${esc(title(it))}<em>${kindLabel(r.b)}${gone ? ' · storniert' : ''}</em></span>
+    return `<div class="log-row ${gone ? 'gone' : ''}"><small>${dTime(r.ts)}</small><span>${esc(title(it))}<em>${kindLabel(r.b)}${gone ? ' · storniert' : ''}${who(r.b)}</em></span>
       <b class="${d < 0 ? 'neg' : 'pos'}">${d < 0 ? '−' : '+'}${esc(qtyText(it, Math.abs(d)))}</b>
       ${can ? `<button class="btn mini" type="button" data-storno="${esc(r.b.id)}">Storno</button>` : ''}</div>`;
   }).join('')}</div>`;
@@ -1030,9 +1043,10 @@ function openSettings() {
     <label class="switch-row"><span>Erklärungen anzeigen<small>${helpMode() === 'auto' ? (days > 0 ? `automatisch noch ${days} Tag${days === 1 ? '' : 'e'}` : 'automatisch aus (4 Wochen vorbei)') : helpMode() === 'on' ? 'immer an' : 'aus'}</small></span>
       <input type="checkbox" id="setHelp" ${helpActive() ? 'checked' : ''}></label>
     <button class="btn" type="button" id="setTour">Kurze Einführung nochmal ansehen</button>
+    <p class="hint">Probleme oder Beschwerden: bitte sofort bei <b>${ADMIN_CONTACT}</b> melden.</p>
 
     <h4 class="set-h">Dieses Handy</h4>
-    <label>Name (nur für den Admin sichtbar)<input id="setName" maxlength="30" value="${esc(state.me.name || '')}" placeholder="z. B. Max iPhone"></label>
+    <label>Dein Name (nur für den Admin sichtbar)<input id="setName" maxlength="30" value="${esc(state.me.name || '')}" placeholder="z. B. Max"></label>
     <p class="hint">Rolle: <b>${admin ? 'Admin' : 'Mitglied'}</b></p>
 
     ${admin ? `
@@ -1051,7 +1065,11 @@ function openSettings() {
     render(); openSettings();
   };
   $('#setTour').onclick = () => { d.close(); startTour(); };
-  $('#setName').onchange = (e) => { backend.setDeviceName(e.target.value); showSnack('Name gespeichert', null); };
+  $('#setName').onchange = (e) => {
+    const n = e.target.value.trim();
+    if (n.length < 2) { e.target.value = state.me.name || ''; showSnack('Name darf nicht leer sein', null); return; }
+    backend.setDeviceName(n); showSnack('Name gespeichert', null);
+  };
   if (admin) {
     $('#setPush').onclick = openPushSettings;
     $('#setDevices').onclick = openDevices;
@@ -1132,8 +1150,33 @@ function openPushSettings() {
   if (!d.open) d.showModal();
 }
 
+// Namensabfrage für bestehende Geräte ohne Namen (nicht wegklickbar)
+function askName() {
+  const d = $('#sheet');
+  delete d.dataset.item;
+  d.innerHTML = `<form class="form" id="nameForm">
+    <h3 style="margin:0">Wie heißt du?</h3>
+    <p class="hint">Damit der Admin sieht, wem welches Handy gehört und bei Fehlbuchungen nachfragen kann. Für die anderen bleibt alles anonym.</p>
+    <input id="askName" maxlength="30" autocomplete="off" placeholder="Dein Name (z. B. Max)" required>
+    <p class="err" id="askErr"></p>
+    <button class="btn primary big" type="submit">Speichern</button></form>`;
+  d.onclick = null;
+  d.oncancel = (e) => e.preventDefault();          // Escape/Wischen schließt nicht
+  $('#nameForm').onsubmit = (ev) => {
+    ev.preventDefault();
+    const n = $('#askName').value.trim();
+    if (n.length < 2) { $('#askErr').textContent = 'Bitte mindestens 2 Zeichen.'; return; }
+    backend.setDeviceName(n);
+    state.me = { ...state.me, name: n };
+    d.oncancel = null; d.close();
+    showSnack('Danke!', null);
+  };
+  if (!d.open) d.showModal();
+}
+
 // ---------- Hilfe: Hinweiskarten + Einführung (4 Wochen ab Beitritt, pro Handy) ----------
 const HELP_DAYS = 28;
+const ADMIN_CONTACT = 'Felix Brenner';
 const helpMode = () => localStorage.getItem('bwz.help') || 'auto';     // auto | on | off
 function helpDaysLeft() {
   const j = Number(localStorage.getItem('bwz.joinedAt')) || Date.now();
@@ -1163,11 +1206,12 @@ function addHint(v, key) {
 }
 
 const TOUR = [
-  ['🍺', 'Willkommen!', 'Mit der App zählt ihr gemeinsam Getränke und Material im Bauwagen. Alles ist anonym – es wird nicht gespeichert, wer was nimmt.'],
+  ['🍺', 'Willkommen!', 'Mit der App zählt ihr gemeinsam Getränke und Material im Bauwagen. Für die anderen sind alle Buchungen anonym. Nur der Admin sieht, von welchem Handy eine Buchung kam – damit Fehlbuchungen geklärt werden können.'],
   ['➖', 'Austragen', 'Auf der Startseite trägt <b>−1</b> eine Flasche aus. Artikel antippen für größere Mengen oder ganze Kästen. Vertippt? Unten erscheint kurz <b>Rückgängig</b>.'],
   ['🛒', 'Einkaufen', 'Unter <b>Liste</b> steht automatisch, was fehlt. Was du gekauft hast, trägst du unter <b>Einkauf</b> ein – oder hakst es in der Liste ab und buchst es dort.'],
   ['📋', 'Vor und nach Partys zählen', 'Auf der Startseite <b>📋 Zählen</b>: alle Artikel auf einer Seite, nur Abweichungen ändern. Mit „Vor Party“ und „Nach Party“ rechnet die Statistik den Verbrauch der Party aus.'],
-  ['📶', 'Funktioniert auch ohne Netz', 'Oben siehst du, ob alles synchron ist. Ohne Internet wird lokal gebucht und später automatisch übertragen. Erklärungen kannst du unter <b>⚙︎</b> ein- und ausschalten.']
+  ['📶', 'Funktioniert auch ohne Netz', 'Oben siehst du, ob alles synchron ist. Ohne Internet wird lokal gebucht und später automatisch übertragen. Erklärungen kannst du unter <b>⚙︎</b> ein- und ausschalten.'],
+  ['📞', 'Probleme oder Beschwerden?', `Bitte sofort bei <b>${ADMIN_CONTACT}</b> melden – egal ob Fehlbuchung, falscher Bestand oder die App spinnt.`]
 ];
 function startTour(step = 0) {
   const d = $('#sheet');

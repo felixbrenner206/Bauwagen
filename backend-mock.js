@@ -75,7 +75,7 @@ export function book(entries) {
     if (!it) continue;
     it.stock += e.delta;
     const id = uid(); ids.push(id);
-    s.bookings.push({ id, ...e, clientTs: now });
+    s.bookings.push({ id, ...e, clientTs: now, by: 'me' });
     s.queue++;
   }
   save(); emit(); scheduleFlush();
@@ -101,11 +101,11 @@ export function getBookings() { return s.bookings.slice(); }
 export function saveCount(label, counted, entries) {
   const id = uid(), now = Date.now();
   s.counts = s.counts || [];
-  s.counts.push({ id, label, counted, clientTs: now });
+  s.counts.push({ id, label, counted, clientTs: now, by: 'me' });
   for (const e of entries) {
     const it = s.items.find(i => i.id === e.itemId); if (!it) continue;
     it.stock += e.delta;
-    s.bookings.push({ id: uid(), itemId: e.itemId, delta: e.delta, kind: 'correction', target: e.target, session: id, clientTs: now });
+    s.bookings.push({ id: uid(), itemId: e.itemId, delta: e.delta, kind: 'correction', target: e.target, session: id, clientTs: now, by: 'me' });
   }
   s.queue++;
   save(); emit(); scheduleFlush();
