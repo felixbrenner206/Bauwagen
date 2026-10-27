@@ -155,3 +155,29 @@ body.demo .top::after { content: "DEMO"; position: absolute; left: 50%; transfor
 .sheet-bar { position: sticky; bottom: calc(-16px - env(safe-area-inset-bottom)); background: var(--bg); padding: 10px 0 4px; margin-top: 8px; }
 .steps-list { padding-left: 20px; margin: 0; line-height: 1.6; }
 .items-head .btn { padding: 10px 12px; }
+
+/* Bestandsaufnahme */
+.stock-head { display: flex; gap: 8px; align-items: center; margin: 12px 0 4px; }
+.stock-head .search { margin: 0; flex: 1; }
+.stock-head .btn { white-space: nowrap; padding: 10px 12px; }
+body.counting .tabs { display: none; }
+body.counting { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+.count-head { padding-top: 10px; display: grid; gap: 10px; }
+.count-top { display: flex; justify-content: space-between; align-items: center; }
+.count-top h2 { margin: 0; font-size: 20px; }
+.count-top .btn.link { width: auto; }
+.count-head .seg { margin: 0; }
+.count-head .hint { margin: 0; }
+.count-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
+.count-row.changed { border-color: var(--accent); }
+.count-name { display: grid; min-width: 0; flex: 1; }
+.count-name span { font-weight: 600; }
+.count-name small { color: var(--muted); font-size: 12px; }
+.count-inputs { display: flex; align-items: flex-end; gap: 6px; flex: none; }
+.count-inputs label { display: grid; gap: 2px; font-size: 11px; color: var(--muted); text-align: center; }
+.count-inputs input { width: 58px; text-align: center; font-size: 20px; font-weight: 600; padding: 9px 4px; font-variant-numeric: tabular-nums; }
+.dev { width: 52px; text-align: right; font-size: 13px; font-weight: 700; color: var(--muted); padding-bottom: 12px; }
+.dev.neg { color: var(--low); }
+.dev.pos { color: var(--ok); }
+.count-bar { bottom: env(safe-area-inset-bottom); }

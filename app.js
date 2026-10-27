@@ -171,12 +171,15 @@ function render() {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.view === state.view));
   const v = $('#view'); if (!v) return;
   if (state.view !== 'buy') delete v.dataset.buyKey;
+  if (state.view !== 'count') delete v.dataset.count;
+  document.body.classList.toggle('counting', state.view === 'count');
   const lowCount = active().filter(below).length;
   const badge = $('#listBadge');
   if (badge) { badge.hidden = !lowCount; badge.textContent = lowCount; }
   if (state.view === 'stock') renderStock(v);
   else if (state.view === 'buy') renderBuy(v);
   else if (state.view === 'list') renderList(v);
+  else if (state.view === 'count') renderCount(v);
   else renderItems(v);
 }
 
@@ -191,7 +194,9 @@ const matches = (it) => !state.search || title(it).toLowerCase().includes(state.
 
 function renderStock(v) {
   if (!$('#stockSearch', v)) {
-    v.innerHTML = `<input class="search" id="stockSearch" type="search" placeholder="Suchen …"><div id="stockList"></div>`;
+    v.innerHTML = `<div class="stock-head"><input class="search" id="stockSearch" type="search" placeholder="Suchen …">
+      <button class="btn" type="button" id="startCount">📋 Zählen</button></div><div id="stockList"></div>`;
+    $('#startCount').onclick = startCount;
     $('#stockSearch').value = state.search;
     $('#stockSearch').oninput = (e) => { state.search = e.target.value; renderStockList(); };
   }
@@ -512,6 +517,110 @@ function openItemForm(id) {
   };
   d.onclick = (e) => { if (e.target === d) d.close(); };
   if (!d.open) d.showModal();
+}
+
+// ---------- Bestandsaufnahme (alle Artikel auf einer Seite) ----------
+// Vorausgefüllt mit dem erwarteten Bestand → nur Abweichungen ändern. Speichert ein Zählprotokoll (counts)
+// plus Korrekturbuchungen; beides zusammen ist die Grundlage der Party-Auswertung in der Statistik.
+const COUNT_KINDS = ['Vor Party', 'Nach Party', 'Sonstige'];
+function startCount() {
+  state.count = { kind: 'Sonstige', name: '', vals: {} };   // vals: { itemId: { big, small } }
+  state.view = 'count'; render(); window.scrollTo(0, 0);
+}
+function countTotal(it) {
+  const v = state.count.vals[it.id];
+  if (!v) return Math.max(0, it.stock);
+  return v.big * bigSize(it) + v.small;
+}
+function devText(it, d) {
+  if (d === 0) return '✓';
+  const n = Math.abs(d), sign = d > 0 ? '+' : '−';
+  return `${sign}${n} ${isDrink(it) ? 'Fl.' : 'St.'}`;
+}
+function renderCount(v) {
+  const items = active();
+  if (v.dataset.count === '1') { updateCountDevs(); return; }   // Sync-Updates zerstören keine Eingaben
+  v.dataset.count = '1';
+  const c = state.count;
+  let html = `<div class="count-head">
+      <div class="count-top"><h2>Bestandsaufnahme</h2><button class="btn link" type="button" id="countCancel">Abbrechen</button></div>
+      <div class="seg" id="countKind">${COUNT_KINDS.map(k => `<button type="button" data-kind="${k}" class="${k === c.kind ? 'active' : ''}">${k}</button>`).join('')}</div>
+      <input id="countName" maxlength="40" placeholder="Anlass (optional), z. B. Halloween" value="${esc(c.name)}">
+      <p class="hint">Vorausgefüllt mit dem erwarteten Bestand – nur ändern, was abweicht. <b>Kästen</b> = volle Kästen, <b>Flaschen</b> = alle losen Flaschen zusammen.</p>
+    </div><form id="countForm" onsubmit="return false">`;
+  for (const [cat, its] of groupByCat(items)) {
+    html += `<h2 class="cat">${esc(cat)}</h2>`;
+    for (const it of its) {
+      const b = bigSize(it), exp = Math.max(0, it.stock);
+      const big = b > 0 ? Math.floor(exp / b) : 0, small = b > 0 ? exp % b : exp;
+      html += `<div class="count-row" data-id="${esc(it.id)}">
+        <div class="count-name"><span>${esc(title(it))}</span><small class="count-exp">erwartet ${esc(qtyText(it, exp))}</small></div>
+        <div class="count-inputs">
+          ${b > 0 ? `<label>${bigWord(it, 2)}<input data-f="big" type="text" inputmode="numeric" pattern="[0-9]*" value="${big}"></label>` : ''}
+          <label>${smallWord(it, 2)}<input data-f="small" type="text" inputmode="numeric" pattern="[0-9]*" value="${small}"></label>
+          <span class="dev">✓</span>
+        </div></div>`;
+    }
+  }
+  html += `</form><div class="buy-bar count-bar"><span id="countSum"></span><button class="btn primary" type="button" id="countSave">Speichern</button></div>`;
+  v.innerHTML = html;
+  v.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => {
+    c.kind = b.dataset.kind;
+    v.querySelectorAll('[data-kind]').forEach(x => x.classList.toggle('active', x === b));
+  });
+  $('#countName').oninput = (e) => { c.name = e.target.value; };
+  const inputs = [...v.querySelectorAll('.count-row input')];
+  inputs.forEach((inp, idx) => {
+    // Antippen leert das Feld (alter Wert grau als Platzhalter) → Tippen überschreibt immer; nichts getippt = Wert bleibt
+    inp.onfocus = () => { inp.dataset.prev = inp.value; inp.placeholder = inp.value; inp.value = ''; };
+    inp.onblur = () => { inp.placeholder = ''; if (inp.value === '') { inp.value = inp.dataset.prev ?? '0'; inp.oninput(); } };
+    inp.oninput = () => {
+      inp.value = inp.value.replace(/\D/g, '');
+      const row = inp.closest('.count-row');
+      const big = row.querySelector('[data-f="big"]'), small = row.querySelector('[data-f="small"]');
+      c.vals[row.dataset.id] = { big: big ? Number(big.value) || 0 : 0, small: Number(small.value) || 0 };
+      updateCountDevs();
+    };
+    inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); (inputs[idx + 1] || inp).focus(); } };
+  });
+  $('#countCancel').onclick = () => {
+    if (Object.keys(c.vals).length && !confirm('Bestandsaufnahme verwerfen?')) return;
+    state.view = 'stock'; render();
+  };
+  $('#countSave').onclick = saveCountSession;
+  updateCountDevs();
+}
+function countEntries() {
+  return active().map(it => ({ it, total: countTotal(it), d: countTotal(it) - it.stock })).filter(x => x.d !== 0);
+}
+function updateCountDevs() {
+  const v = $('#view');
+  v.querySelectorAll('.count-row').forEach(row => {
+    const it = getItem(row.dataset.id); if (!it) return;
+    const d = countTotal(it) - it.stock;
+    const dev = row.querySelector('.dev');
+    dev.textContent = devText(it, d);
+    dev.className = 'dev ' + (d < 0 ? 'neg' : d > 0 ? 'pos' : '');
+    row.classList.toggle('changed', d !== 0);
+    row.querySelector('.count-exp').textContent = `erwartet ${qtyText(it, Math.max(0, it.stock))}`;
+  });
+  const n = countEntries().length;
+  const sum = $('#countSum'); if (sum) sum.textContent = n ? `${n} Abweichung${n === 1 ? '' : 'en'}` : 'Alles wie erwartet';
+}
+function saveCountSession() {
+  const c = state.count;
+  const label = c.kind + (c.name.trim() ? `: ${c.name.trim()}` : '');
+  const devs = countEntries();
+  const lost = devs.filter(x => x.d < 0).reduce((a, x) => a + (isDrink(x.it) && x.it.sizeL ? -x.d * x.it.sizeL : 0), 0);
+  const msg = devs.length
+    ? `${label} speichern?\n${devs.length} Abweichung(en)` + (lost ? `, Fehlmenge ${fmt(lost)} L` : '')
+    : `${label} speichern?\nAlles wie erwartet.`;
+  if (!confirm(msg)) return;
+  const counted = {};
+  active().forEach(it => { counted[it.id] = countTotal(it); });
+  backend.saveCount(label, counted, devs.map(x => ({ itemId: x.it.id, delta: x.d, target: x.total })));
+  state.view = 'stock'; render();
+  showSnack(`Bestandsaufnahme gespeichert (${devs.length} Korrekturen)`, null);
 }
 
 // ---------- Einkaufsliste ----------

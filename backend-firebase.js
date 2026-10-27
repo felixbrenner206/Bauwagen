@@ -149,3 +149,18 @@ export async function updateAlerts(mutator) {
     return res.result;
   });
 }
+
+// ---------- Bestandsaufnahme: ein Zähl-Dokument + Korrekturbuchungen in EINEM Batch ----------
+// counted: { itemId: gezählte Menge }  entries: [{ itemId, delta, target }]
+export function saveCount(label, counted, entries) {
+  const batch = writeBatch(db);
+  const cRef = doc(collection(db, 'counts'));
+  const now = Date.now();
+  batch.set(cRef, { label, counted, clientTs: now, ts: serverTimestamp() });
+  for (const e of entries) {
+    batch.set(doc(collection(db, 'bookings')), { itemId: e.itemId, delta: e.delta, kind: 'correction', target: e.target, session: cRef.id, clientTs: now, ts: serverTimestamp() });
+    batch.update(doc(db, 'items', e.itemId), { stock: increment(e.delta), updatedAt: serverTimestamp() });
+  }
+  batch.commit().catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Bestandsaufnahme abgelehnt: ' + (err.code || err.message) })));
+  return cRef.id;
+}

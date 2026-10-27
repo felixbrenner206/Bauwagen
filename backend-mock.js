@@ -79,6 +79,21 @@ export function saveItem(fields, id) {
 
 export function getBookings() { return s.bookings.slice(); }
 
+export function saveCount(label, counted, entries) {
+  const id = uid(), now = Date.now();
+  s.counts = s.counts || [];
+  s.counts.push({ id, label, counted, clientTs: now });
+  for (const e of entries) {
+    const it = s.items.find(i => i.id === e.itemId); if (!it) continue;
+    it.stock += e.delta;
+    s.bookings.push({ id: uid(), itemId: e.itemId, delta: e.delta, kind: 'correction', target: e.target, session: id, clientTs: now });
+  }
+  s.queue++;
+  save(); emit(); scheduleFlush();
+  return id;
+}
+export function getCounts() { return (s.counts || []).slice(); }
+
 // Meta (Einstellungen + Push-Zustand) separat gespeichert, damit mehrere Tabs dieselben Werte sehen (Dedupe-Test)
 const MKEY = 'bwz.demo.meta';
 const readMeta = () => { try { return JSON.parse(localStorage.getItem(MKEY)) || { settings: {}, alerts: {} }; } catch (e) { return { settings: {}, alerts: {} }; } };
