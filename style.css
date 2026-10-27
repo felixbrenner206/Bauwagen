@@ -11,11 +11,11 @@
     --btn: #2b2f34;
   }
 }
-* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }  /* kein Doppeltipp-Zoom */
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 body { font: 16px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
 button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; }
-input { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; }
+input { font: inherit; font-size: 16px; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; }
 input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 [hidden] { display: none !important; }
 
@@ -181,3 +181,45 @@ body.counting { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
 .dev.neg { color: var(--low); }
 .dev.pos { color: var(--ok); }
 .count-bar { bottom: env(safe-area-inset-bottom); }
+
+/* Mehrere Flaschengrößen */
+.count-row { flex-wrap: wrap; }
+.count-inputs { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; font-size: 16px; }
+
+/* Statistik */
+.tabs button { font-size: 14px; padding: 16px 0 14px; }
+.stats-head { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
+.stats-head h2 { margin: 0; font-size: 22px; }
+.stats-head .btn { padding: 8px 12px; font-size: 14px; }
+.beta { font-size: 11px; vertical-align: middle; background: var(--accent); color: var(--accent-text); padding: 2px 7px; border-radius: 6px; letter-spacing: 1px; }
+.beta-note { margin: 6px 0 10px; }
+.bars { display: flex; align-items: flex-end; gap: 6px; height: 170px; margin: 14px 0 8px; }
+.bar { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; padding: 0; }
+.bar i { width: 100%; background: var(--btn); border-radius: 6px 6px 2px 2px; display: block; }
+.bar.sel i { background: var(--accent); }
+.bar b { font-size: 11px; color: var(--muted); }
+.bar span { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.bar.sel span { color: var(--text); font-weight: 700; }
+.stat-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 10px; }
+.stat-title { color: var(--muted); font-size: 14px; font-weight: 600; }
+.stat-big { font-size: 30px; font-weight: 800; letter-spacing: -.5px; margin: 2px 0 8px; font-variant-numeric: tabular-nums; }
+.sub { font-size: 14px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.cat-bars { display: grid; gap: 6px; }
+.cbar { display: grid; grid-template-columns: 110px 1fr 64px; align-items: center; gap: 8px; font-size: 14px; }
+.cbar i { height: 10px; background: var(--accent); border-radius: 5px; display: block; }
+.cbar b { text-align: right; font-variant-numeric: tabular-nums; }
+.top-list { margin: 0; padding-left: 22px; display: grid; gap: 6px; }
+.top-list li { display: grid; grid-template-columns: 1fr auto; gap: 0 10px; }
+.top-list li span { font-weight: 600; }
+.top-list li small { color: var(--muted); grid-column: 1; }
+.top-list li b { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-variant-numeric: tabular-nums; }
+.log { display: grid; gap: 6px; margin-top: 12px; }
+.log-row { display: grid; grid-template-columns: 1fr auto; gap: 0 10px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.log-row small { color: var(--muted); font-size: 12px; grid-column: 1 / -1; }
+.log-row span { font-weight: 600; }
+.log-row em { font-style: normal; color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px; }
+.log-row b.neg { color: var(--low); }
+.log-row b.pos { color: var(--ok); }
+.log-row.count { border-color: var(--accent); }
+.count-name { flex: 1 1 130px; }

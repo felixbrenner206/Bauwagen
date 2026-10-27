@@ -10,7 +10,7 @@ import {
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
   collection, doc, onSnapshot, query, where, orderBy, limit,
-  writeBatch, increment, serverTimestamp, setDoc, updateDoc, getDocFromServer, runTransaction
+  writeBatch, increment, serverTimestamp, setDoc, updateDoc, getDocFromServer, runTransaction, getDocs
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import { firebaseConfig } from './config.js';
 
@@ -163,4 +163,17 @@ export function saveCount(label, counted, entries) {
   }
   batch.commit().catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Bestandsaufnahme abgelehnt: ' + (err.code || err.message) })));
   return cRef.id;
+}
+
+// ---------- Statistik: komplette Historie laden (bei Netz vom Server, sonst aus dem lokalen Cache) ----------
+export async function fetchHistory() {
+  const [b, c] = await Promise.all([
+    getDocs(query(collection(db, 'bookings'), orderBy('clientTs'))),
+    getDocs(query(collection(db, 'counts'), orderBy('clientTs')))
+  ]);
+  return {
+    bookings: b.docs.map(d => ({ id: d.id, ...d.data(), ts: undefined })),
+    counts: c.docs.map(d => ({ id: d.id, ...d.data(), ts: undefined })),
+    fromCache: b.metadata.fromCache
+  };
 }

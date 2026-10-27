@@ -93,6 +93,9 @@ export function saveCount(label, counted, entries) {
   return id;
 }
 export function getCounts() { return (s.counts || []).slice(); }
+export async function fetchHistory() {
+  return { bookings: s.bookings.slice().sort((a, b) => a.clientTs - b.clientTs), counts: (s.counts || []).slice(), fromCache: !online };
+}
 
 // Meta (Einstellungen + Push-Zustand) separat gespeichert, damit mehrere Tabs dieselben Werte sehen (Dedupe-Test)
 const MKEY = 'bwz.demo.meta';

@@ -1,4 +1,5 @@
-// Bauwagen-Zähler – Etappe 1+2: Bestand, Austragen, Einkauf, Inventur, Artikel, Offline-Sync, Einkaufsliste, Push (ntfy)
+// Bauwagen-Zähler – Etappe 1–3: Bestand, Austragen, Einkauf, Inventur, Artikel, Offline-Sync, Einkaufsliste, Push (ntfy),
+// Bestandsaufnahme, mehrere Flaschengrößen, Statistik (Beta)
 const PARAMS = new URLSearchParams(location.search);
 const DEMO = PARAMS.has('demo');
 const IMPORT = PARAMS.has('import');
@@ -14,6 +15,7 @@ const state = {
   cart: {},          // Einkauf: { itemId: { big, small } }
   settings: {},      // { ntfyTopic }
   shopChecked: new Set(JSON.parse(localStorage.getItem('bwz.shopChecked') || '[]')),
+  stats: { tab: 'week', data: null, loading: false, sel: null, err: '' },
   error: ''
 };
 
@@ -33,7 +35,18 @@ function suggestion(it) {
 }
 const plain = (t) => String(t).replace(/\u00a0/g, ' ');
 
+// Mehrere Flaschengrößen (Rev. 4): Bestand bleibt in Standardflaschen (z. B. 0,75 L), andere Größen werden umgerechnet
+// → Bestand kann dann krumm sein (1 L Schnaps = 1,333 Standardflaschen). Anzeige dann in Litern.
+const isInt = (n) => Math.abs(n - Math.round(n)) < 1e-6;
+const r4 = (n) => Math.round(n * 10000) / 10000;
+const altSizes = (it) => (isDrink(it) && it.sizeL > 0 && Array.isArray(it.altSizes))
+  ? it.altSizes.filter(x => x > 0 && Math.abs(x - it.sizeL) > 1e-9).sort((a, b) => a - b) : [];
+const sizeLabel = (l) => `${fmt(l, 3)}\u00a0L`;
+const altKey = (l) => 'alt' + String(l).replace('.', '_');
+
 function qtyText(it, n) {
+  if (!isInt(n) && isDrink(it) && it.sizeL) return `${fmt(n * it.sizeL)} L`;
+  n = Math.round(n);
   const b = bigSize(it);
   if (b > 0 && n >= b) {
     const big = Math.floor(n / b), small = n % b;
@@ -48,6 +61,7 @@ function stockMain(it) {
 }
 function stockSub(it) {
   const s = it.stock, b = bigSize(it);
+  if (!isInt(s)) return `≈ ${fmt(s, 1)} Fl. à ${fmt(it.sizeL, 3)} L`;
   if (b > 0 && s >= 0) {
     const big = Math.floor(s / b), small = s % b;
     return `${big} ${bigWord(it, big)} · ${small} ${smallWord(it, small)}`;
@@ -112,6 +126,7 @@ function run() {
       <button data-view="buy">Einkauf</button>
       <button data-view="list">Liste<span class="tab-badge" id="listBadge" hidden></span></button>
       <button data-view="items">Artikel</button>
+      <button data-view="stats">Statistik</button>
     </nav>
     <div class="snack" id="snack" hidden><span id="snackText"></span><button id="snackUndo" type="button">Rückgängig</button></div>
     <dialog id="sheet"></dialog>`;
@@ -180,6 +195,7 @@ function render() {
   else if (state.view === 'buy') renderBuy(v);
   else if (state.view === 'list') renderList(v);
   else if (state.view === 'count') renderCount(v);
+  else if (state.view === 'stats') renderStats(v);
   else renderItems(v);
 }
 
@@ -277,6 +293,27 @@ function wireSteppers(root, onChange) {
 }
 const readStep = (root, key) => Math.max(0, parseInt(root.querySelector(`.stepper[data-key="${key}"] [data-input]`)?.value, 10) || 0);
 
+// Mengeneingabe für einen Artikel: Kästen/Packungen + Standardflaschen + ggf. weitere Flaschengrößen
+function qtySteppers(it, init = {}) {
+  const b = bigSize(it), alts = altSizes(it);
+  let h = '';
+  if (b > 0) h += stepper('big', `${bigWord(it, 2)} (à ${b})`, init.big || 0);
+  h += stepper('small', alts.length ? `Flaschen ${sizeLabel(it.sizeL)}` : smallWord(it, 2), init.small || 0);
+  for (const a of alts) h += stepper(altKey(a), `Flaschen ${sizeLabel(a)}`, (init.alt && init.alt[a]) || 0);
+  return h;
+}
+function readParts(root, it) {
+  const alt = {};
+  for (const a of altSizes(it)) alt[a] = readStep(root, altKey(a));
+  return { big: readStep(root, 'big'), small: readStep(root, 'small'), alt };
+}
+function partsQty(it, c) {
+  let q = (c.big || 0) * bigSize(it) + (c.small || 0);
+  for (const a of altSizes(it)) q += ((c.alt && c.alt[a]) || 0) * a / it.sizeL;
+  return r4(q);
+}
+const partsEmpty = (c) => !(c.big || c.small || Object.values(c.alt || {}).some(Boolean));
+
 let sheetMode = 'out';
 function openSheet(id) {
   const it = getItem(id); if (!it) return;
@@ -314,17 +351,13 @@ function refreshSheetHeader() {
 function buildSheetBody() {
   const it = getItem($('#sheet').dataset.item);
   $('#seg').querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.mode === sheetMode));
-  const hasBig = bigSize(it) > 0;
   let html = '';
   if (sheetMode === 'inv') {
-    const s = Math.max(0, it.stock), b = bigSize(it);
-    const big = hasBig ? Math.floor(s / b) : 0, small = hasBig ? s % b : s;
-    if (hasBig) html += stepper('big', `Volle ${bigWord(it, 2)} (à ${b})`, big);
-    html += stepper('small', hasBig ? `Einzelne ${smallWord(it, 2)}` : smallWord(it, 2), small);
+    const b = bigSize(it), whole = Math.floor(Math.max(0, it.stock) + 1e-6);
+    html = qtySteppers(it, { big: b > 0 ? Math.floor(whole / b) : 0, small: b > 0 ? whole % b : whole });
     $('#sheetHint').textContent = 'Tatsächlich gezählten Bestand eingeben. Wird als Korrekturbuchung gespeichert.';
   } else {
-    if (hasBig) html += stepper('big', bigWord(it, 2) + ` (à ${bigSize(it)})`, 0);
-    html += stepper('small', smallWord(it, 2), sheetMode === 'out' ? 1 : 0);
+    html = qtySteppers(it, { small: sheetMode === 'out' ? 1 : 0 });
     $('#sheetHint').textContent = sheetMode === 'out' ? 'Menge, die rausgenommen wird.' : 'Menge, die dazukommt (z. B. Einkauf eines einzelnen Artikels).';
   }
   $('#steps').innerHTML = html;
@@ -334,15 +367,15 @@ function buildSheetBody() {
 }
 function sheetQty() {
   const it = getItem($('#sheet').dataset.item);
-  return readStep($('#steps'), 'big') * bigSize(it) + readStep($('#steps'), 'small');
+  return partsQty(it, readParts($('#steps'), it));
 }
 function updateSheetResult() {
   const it = getItem($('#sheet').dataset.item); const r = $('#sheetResult'); if (!it || !r) return;
   const q = sheetQty();
-  let delta = sheetMode === 'out' ? -q : sheetMode === 'in' ? q : q - it.stock;
+  let delta = r4(sheetMode === 'out' ? -q : sheetMode === 'in' ? q : q - it.stock);
   const after = it.stock + delta;
   r.innerHTML = sheetMode === 'inv'
-    ? (delta === 0 ? 'Keine Abweichung.' : `Abweichung: <b>${delta > 0 ? '+' : ''}${delta} ${smallWord(it, Math.abs(delta))}</b>`)
+    ? (delta === 0 ? 'Keine Abweichung.' : `Abweichung: <b>${delta > 0 ? '+' : '−'}${esc(qtyText(it, Math.abs(delta)))}</b>`)
     : (q === 0 ? 'Menge wählen.' : `${sheetMode === 'out' ? '−' : '+'}${esc(qtyText(it, q))} → danach ${esc(stockMain({ ...it, stock: after }))}`);
   $('#sheetGo').disabled = sheetMode === 'inv' ? delta === 0 : q === 0;
 }
@@ -351,7 +384,7 @@ function submitSheet() {
   const q = sheetQty();
   if (sheetMode === 'out') doBook([{ itemId: id, delta: -q, kind: 'out' }], `−${qtyText(it, q)} ${title(it)}`);
   else if (sheetMode === 'in') doBook([{ itemId: id, delta: q, kind: 'in' }], `+${qtyText(it, q)} ${title(it)}`);
-  else doBook([{ itemId: id, delta: q - it.stock, kind: 'correction', target: q }], `Inventur ${title(it)}: ${qtyText(it, q)}`);
+  else doBook([{ itemId: id, delta: r4(q - it.stock), kind: 'correction', target: q }], `Inventur ${title(it)}: ${qtyText(it, q)}`);
   $('#sheet').close();
 }
 
@@ -360,7 +393,7 @@ function renderBuy(v) {
   const items = active();
   if (!items.length) { v.innerHTML = `<p class="empty">Noch keine Artikel.</p>`; return; }
   // Bei Sync-Updates nicht neu aufbauen (sonst springt die Eingabe) – nur Bestandstexte aktualisieren
-  const key = items.map(i => i.id + bigSize(i) + title(i) + i.category).sort().join('|');
+  const key = items.map(i => i.id + bigSize(i) + title(i) + i.category + altSizes(i).join(',')).sort().join('|');
   if (v.dataset.buyKey === key && $('.buy-row', v)) {
     items.forEach(it => {
       const s = v.querySelector(`.buy-row[data-id="${it.id}"] .buy-stock`);
@@ -373,14 +406,10 @@ function renderBuy(v) {
   for (const [cat, its] of groupByCat(items)) {
     html += `<h2 class="cat">${esc(cat)}</h2>`;
     for (const it of its) {
-      const c = state.cart[it.id] || { big: 0, small: 0 };
-      const hasBig = bigSize(it) > 0;
-      html += `<div class="buy-row ${c.big || c.small ? 'has' : ''}" data-id="${esc(it.id)}">
+      const c = state.cart[it.id] || { big: 0, small: 0, alt: {} };
+      html += `<div class="buy-row ${partsEmpty(c) ? '' : 'has'}" data-id="${esc(it.id)}">
         <div class="buy-name">${esc(title(it))}<small class="buy-stock">Bestand ${esc(stockMain(it))}${below(it) ? ' · <span class="lowtxt">unter Min.</span>' : ''}</small></div>
-        <div class="buy-steps">
-          ${hasBig ? stepper('big', bigWord(it, 2), c.big) : ''}
-          ${stepper('small', smallWord(it, 2), c.small)}
-        </div>
+        <div class="buy-steps">${qtySteppers(it, c)}</div>
       </div>`;
     }
   }
@@ -388,9 +417,9 @@ function renderBuy(v) {
   v.innerHTML = html;
   v.querySelectorAll('.buy-row').forEach(row => {
     wireSteppers(row, () => {
-      const id = row.dataset.id;
-      state.cart[id] = { big: readStep(row, 'big'), small: readStep(row, 'small') };
-      row.classList.toggle('has', !!(state.cart[id].big || state.cart[id].small));
+      const id = row.dataset.id, it = getItem(id); if (!it) return;
+      state.cart[id] = readParts(row, it);
+      row.classList.toggle('has', !partsEmpty(state.cart[id]));
       updateBuySum();
     });
   });
@@ -400,7 +429,7 @@ function renderBuy(v) {
 function cartEntries() {
   return Object.entries(state.cart).map(([id, c]) => {
     const it = getItem(id); if (!it || it.archived) return null;
-    const q = c.big * bigSize(it) + c.small;
+    const q = partsQty(it, c);
     return q > 0 ? { itemId: id, delta: q, kind: 'in' } : null;
   }).filter(Boolean);
 }
@@ -424,6 +453,7 @@ function renderItems(v) {
   let html = `<div class="items-head">
       <button class="btn primary" type="button" id="newItem">+ Neuer Artikel</button>
       <button class="btn" type="button" id="minBulk">Mindestbestände</button>
+      <button class="btn" type="button" id="sizeBulk">Flaschengrößen</button>
       <button class="btn" type="button" id="pushSet">Push ${state.settings.ntfyTopic ? '✓' : '⚠︎'}</button>
     </div>
     ${noMin ? `<p class="hint">${noMin} Artikel ohne Mindestbestand – die erscheinen nie auf der Einkaufsliste.</p>` : ''}
@@ -433,7 +463,8 @@ function renderItems(v) {
     html += `<h2 class="cat">${esc(cat)}</h2>`;
     for (const it of its) {
       const meta = isDrink(it)
-        ? [it.sizeL ? `${fmt(it.sizeL, 3)} L/Fl.` : null, it.perCase ? `${it.perCase} Fl./Kasten` : null]
+        ? [it.sizeL ? `${fmt(it.sizeL, 3)} L/Fl.` : null, it.perCase ? `${it.perCase} Fl./Kasten` : null,
+           altSizes(it).length ? `auch ${altSizes(it).map(a => fmt(a, 3) + ' L').join(', ')}` : null]
         : ['Stück', it.packSize ? `${it.packSize}/Packung` : null];
       meta.push(it.minStock > 0 ? `Min ${qtyText(it, it.minStock)}` : 'kein Mindestbestand');
       html += `<button class="item-row ${it.archived ? 'arch' : ''}" type="button" data-edit="${esc(it.id)}">
@@ -444,6 +475,7 @@ function renderItems(v) {
   v.innerHTML = html;
   $('#newItem').onclick = () => openItemForm(null);
   $('#minBulk').onclick = openMinBulk;
+  $('#sizeBulk').onclick = openSizeBulk;
   $('#pushSet').onclick = openSettings;
   $('#showArch').onchange = (e) => { state.showArchived = e.target.checked; render(); };
   v.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openItemForm(b.dataset.edit));
@@ -468,6 +500,7 @@ function openItemForm(id) {
       <label>Liter pro Flasche<input name="sizeL" type="text" inputmode="decimal" value="${it.sizeL != null ? fmt(it.sizeL, 3) : ''}" placeholder="0,5"></label>
       <label>Flaschen pro Kasten<input name="perCase" type="number" inputmode="numeric" min="0" value="${it.perCase ?? ''}" placeholder="20"></label>
     </div>
+    <label class="only-drink">Weitere Flaschengrößen in L (optional)<input name="altSizes" type="text" inputmode="decimal" value="${esc(altSizes(it).map(a => fmt(a, 3)).join('; '))}" placeholder="z. B. 1  oder  0,5; 1,5"></label>
     <div class="grid2 only-piece">
       <label>Stück pro Packung (optional)<input name="packSize" type="number" inputmode="numeric" min="0" value="${it.packSize ?? ''}"></label>
     </div>
@@ -501,7 +534,8 @@ function openItemForm(id) {
       sizeL: type === 'drink' ? num('sizeL') : null,
       perCase: type === 'drink' ? num('perCase') : null,
       packSize: type === 'piece' ? num('packSize') : null,
-      minStock: Math.round(num('minStock') ?? 0)
+      minStock: Math.round(num('minStock') ?? 0),
+      altSizes: type === 'drink' ? parseSizes(fd.get('altSizes')) : []
     };
     for (const k of ['sizeL', 'perCase', 'packSize', 'minStock']) {
       if (data[k] !== null && (!isFinite(data[k]) || data[k] < 0)) { $('#formErr').textContent = 'Ungültige Zahl.'; return; }
@@ -511,9 +545,53 @@ function openItemForm(id) {
     if (id) data.archived = !!it.archived;
     const newId = backend.saveItem(data, id);
     const init = id ? 0 : Math.max(0, Math.round(num('initial') || 0));
-    if (init > 0) backend.book([{ itemId: newId, delta: init, kind: 'correction', target: init }]);
+    if (init > 0) backend.book([{ itemId: newId, delta: init, kind: 'correction', target: init, ref: 'init' }]);
     d.close();
     showSnack(id ? 'Gespeichert' : 'Artikel angelegt', null);
+  };
+  d.onclick = (e) => { if (e.target === d) d.close(); };
+  if (!d.open) d.showModal();
+}
+
+// Eingabe "1" oder "0,5; 1,5" → [1] bzw. [0.5, 1.5]
+function parseSizes(txt) {
+  return [...new Set((String(txt || '').match(/\d+(?:[.,]\d+)?/g) || []).map(x => Number(x.replace(',', '.'))).filter(x => x > 0 && x <= 5))].sort((a, b) => a - b);
+}
+
+// Flaschengrößen für eine ganze Kategorie setzen (z. B. alle Schnäpse: zusätzlich 1 L)
+function openSizeBulk() {
+  const cats = [...new Set(active().filter(isDrink).map(i => i.category || 'Ohne Kategorie'))].sort((a, b) => a.localeCompare(b, 'de'));
+  const d = $('#sheet');
+  delete d.dataset.item;
+  d.innerHTML = `<form class="form" id="sizeForm">
+    <div class="sheet-head"><h3>Flaschengrößen</h3><button class="x" type="button" data-close>✕</button></div>
+    <p class="hint">Für Artikel, die es in verschiedenen Flaschengrößen gibt (z. B. Schnaps 0,75 L und 1 L, Cola 1 L und 1,5 L). Beim Einkaufen und Zählen erscheinen dann eigene Felder pro Größe – umgerechnet wird automatisch.</p>
+    <label>Kategorie<select name="cat">${cats.map(c => `<option>${esc(c)}</option>`).join('')}</select></label>
+    <label>Weitere Größen in L<input name="sizes" type="text" inputmode="decimal" placeholder="z. B. 1  oder  0,5; 1,5"></label>
+    <div id="sizePrev" class="hint"></div>
+    <button class="btn primary big" type="submit">Für alle Artikel der Kategorie übernehmen</button>
+  </form>`;
+  const f = $('#sizeForm');
+  const prev = () => {
+    const its = active().filter(i => isDrink(i) && (i.category || 'Ohne Kategorie') === f.cat.value);
+    const sz = parseSizes(f.sizes.value);
+    $('#sizePrev').innerHTML = its.map(i => `${esc(plain(title(i)))}: ${altSizes({ ...i, altSizes: sz }).map(a => fmt(a, 3) + ' L').join(', ') || 'nur Standard'}`).join('<br>');
+  };
+  f.cat.onchange = () => {
+    const first = active().find(i => isDrink(i) && (i.category || 'Ohne Kategorie') === f.cat.value && altSizes(i).length);
+    f.sizes.value = first ? altSizes(first).map(a => fmt(a, 3)).join('; ') : '';
+    prev();
+  };
+  f.sizes.oninput = prev;
+  f.cat.onchange();
+  f.querySelector('[data-close]').onclick = () => d.close();
+  f.onsubmit = (ev) => {
+    ev.preventDefault();
+    const sz = parseSizes(f.sizes.value);
+    const its = active().filter(i => isDrink(i) && (i.category || 'Ohne Kategorie') === f.cat.value);
+    its.forEach(i => backend.saveItem({ altSizes: sz }, i.id));
+    d.close();
+    showSnack(`${its.length} Artikel aktualisiert`, null);
   };
   d.onclick = (e) => { if (e.target === d) d.close(); };
   if (!d.open) d.showModal();
@@ -530,12 +608,13 @@ function startCount() {
 function countTotal(it) {
   const v = state.count.vals[it.id];
   if (!v) return Math.max(0, it.stock);
-  return v.big * bigSize(it) + v.small;
+  return partsQty(it, v);
 }
 function devText(it, d) {
   if (d === 0) return '✓';
   const n = Math.abs(d), sign = d > 0 ? '+' : '−';
-  return `${sign}${n} ${isDrink(it) ? 'Fl.' : 'St.'}`;
+  if (!isInt(n) && isDrink(it) && it.sizeL) return `${sign}${fmt(n * it.sizeL)} L`;
+  return `${sign}${Math.round(n)} ${isDrink(it) ? 'Fl.' : 'St.'}`;
 }
 function renderCount(v) {
   const items = active();
@@ -551,13 +630,15 @@ function renderCount(v) {
   for (const [cat, its] of groupByCat(items)) {
     html += `<h2 class="cat">${esc(cat)}</h2>`;
     for (const it of its) {
-      const b = bigSize(it), exp = Math.max(0, it.stock);
-      const big = b > 0 ? Math.floor(exp / b) : 0, small = b > 0 ? exp % b : exp;
+      const b = bigSize(it), exp = Math.max(0, it.stock), whole = Math.floor(exp + 1e-6);
+      const big = b > 0 ? Math.floor(whole / b) : 0, small = b > 0 ? whole % b : whole;
+      const alts = altSizes(it);
       html += `<div class="count-row" data-id="${esc(it.id)}">
         <div class="count-name"><span>${esc(title(it))}</span><small class="count-exp">erwartet ${esc(qtyText(it, exp))}</small></div>
         <div class="count-inputs">
           ${b > 0 ? `<label>${bigWord(it, 2)}<input data-f="big" type="text" inputmode="numeric" pattern="[0-9]*" value="${big}"></label>` : ''}
-          <label>${smallWord(it, 2)}<input data-f="small" type="text" inputmode="numeric" pattern="[0-9]*" value="${small}"></label>
+          <label>${alts.length ? sizeLabel(it.sizeL) : smallWord(it, 2)}<input data-f="small" type="text" inputmode="numeric" pattern="[0-9]*" value="${small}"></label>
+          ${alts.map(a => `<label>${sizeLabel(a)}<input data-f="alt" data-size="${a}" type="text" inputmode="numeric" pattern="[0-9]*" value="0"></label>`).join('')}
           <span class="dev">✓</span>
         </div></div>`;
     }
@@ -578,7 +659,9 @@ function renderCount(v) {
       inp.value = inp.value.replace(/\D/g, '');
       const row = inp.closest('.count-row');
       const big = row.querySelector('[data-f="big"]'), small = row.querySelector('[data-f="small"]');
-      c.vals[row.dataset.id] = { big: big ? Number(big.value) || 0 : 0, small: Number(small.value) || 0 };
+      const alt = {};
+      row.querySelectorAll('[data-f="alt"]').forEach(x => { alt[Number(x.dataset.size)] = Number(x.value) || 0; });
+      c.vals[row.dataset.id] = { big: big ? Number(big.value) || 0 : 0, small: Number(small.value) || 0, alt };
       updateCountDevs();
     };
     inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); (inputs[idx + 1] || inp).focus(); } };
@@ -591,13 +674,13 @@ function renderCount(v) {
   updateCountDevs();
 }
 function countEntries() {
-  return active().map(it => ({ it, total: countTotal(it), d: countTotal(it) - it.stock })).filter(x => x.d !== 0);
+  return active().map(it => ({ it, total: countTotal(it), d: r4(countTotal(it) - it.stock) })).filter(x => Math.abs(x.d) > 1e-6);
 }
 function updateCountDevs() {
   const v = $('#view');
   v.querySelectorAll('.count-row').forEach(row => {
     const it = getItem(row.dataset.id); if (!it) return;
-    const d = countTotal(it) - it.stock;
+    const d = r4(countTotal(it) - it.stock);
     const dev = row.querySelector('.dev');
     dev.textContent = devText(it, d);
     dev.className = 'dev ' + (d < 0 ? 'neg' : d > 0 ? 'pos' : '');
@@ -621,6 +704,168 @@ function saveCountSession() {
   backend.saveCount(label, counted, devs.map(x => ({ itemId: x.it.id, delta: x.d, target: x.total })));
   state.view = 'stock'; render();
   showSnack(`Bestandsaufnahme gespeichert (${devs.length} Korrekturen)`, null);
+}
+
+// ---------- Statistik (Beta) ----------
+// Verbrauch (Lastenheft Rev. 3) = Austragen + Fehlmengen aus Bestandsaufnahmen/Inventur; Mehrbestand wird gegengerechnet.
+// Nicht als Verbrauch zählen: Einkäufe, Anfangsbestände, Rückgängig von Einkäufen.
+const DAY = 86400000;
+const WD = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+const MON = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+const dDate = (ts) => { const d = new Date(ts); return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.`; };
+const dTime = (ts) => { const d = new Date(ts); return `${WD[d.getDay()]} ${dDate(ts)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+function weekStart(ts) { const d = new Date(ts); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); }
+function kw(ts) {
+  const d = new Date(ts); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+  const w1 = new Date(d.getFullYear(), 0, 4);
+  return 1 + Math.round(((d - w1) / DAY - 3 + ((w1.getDay() + 6) % 7)) / 7);
+}
+function periods(kind, n) {
+  const res = [];
+  if (kind === 'week') {
+    let start = new Date(weekStart(Date.now()));
+    for (let i = 0; i < n; i++) {
+      const end = new Date(start); end.setDate(end.getDate() + 7);
+      res.unshift({ from: start.getTime(), to: end.getTime(), label: `KW ${kw(start.getTime())}`, long: `KW ${kw(start.getTime())} (${dDate(start.getTime())}–${dDate(end.getTime() - DAY)})` });
+      start = new Date(start); start.setDate(start.getDate() - 7);
+    }
+  } else {
+    const now = new Date();
+    for (let i = n - 1; i >= 0; i--) {
+      const from = new Date(now.getFullYear(), now.getMonth() - i, 1), to = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
+      res.push({ from: from.getTime(), to: to.getTime(), label: MON[from.getMonth()], long: `${MONTHS[from.getMonth()]} ${from.getFullYear()}` });
+    }
+  }
+  return res;
+}
+const isInitBooking = (b) => b.kind === 'correction' && (b.ref === 'init' || (!b.session && b.delta > 0 && Math.abs((b.target ?? -1) - b.delta) < 1e-6));
+function consumptionEvents(data) {
+  const byId = Object.fromEntries(data.bookings.map(b => [b.id, b]));
+  const out = [];
+  for (const b of data.bookings) {
+    let c = 0;
+    if (b.kind === 'out') c = -b.delta;
+    else if (b.kind === 'correction') c = isInitBooking(b) ? 0 : -b.delta;
+    else if (b.kind === 'undo') { const o = byId[b.ref]; if (o && (o.kind === 'out' || (o.kind === 'correction' && !isInitBooking(o)))) c = -b.delta; }
+    if (c && getItem(b.itemId)) out.push({ itemId: b.itemId, units: c, ts: b.clientTs });
+  }
+  return out;
+}
+const litersOf = (it, units) => (isDrink(it) && it.sizeL ? units * it.sizeL : 0);
+function aggregate(perItem) {   // perItem: { itemId: units } → Summen
+  let liters = 0; const byCat = {}; const rows = [];
+  for (const [id, u] of Object.entries(perItem)) {
+    const it = getItem(id); if (!it || Math.abs(u) < 1e-6) continue;
+    const l = litersOf(it, u); liters += l;
+    const cat = it.category || 'Ohne Kategorie';
+    byCat[cat] = (byCat[cat] || 0) + l;
+    rows.push({ it, units: r4(u), liters: l });
+  }
+  rows.sort((a, b) => (b.liters - a.liters) || (b.units - a.units));
+  return { liters, byCat, rows };
+}
+function sumEvents(events, from, to) {
+  const per = {};
+  for (const e of events) if (e.ts >= from && e.ts < to) per[e.itemId] = (per[e.itemId] || 0) + e.units;
+  return aggregate(per);
+}
+function partyList(data) {
+  const counts = [...data.counts].sort((a, b) => a.clientTs - b.clientTs);
+  const byId = Object.fromEntries(data.bookings.map(b => [b.id, b]));
+  const res = [];
+  counts.forEach((c, i) => {
+    if (!String(c.label).startsWith('Vor Party')) return;
+    const next = counts.slice(i + 1).find(x => /^(Vor|Nach) Party/.test(x.label));
+    if (!next || !next.label.startsWith('Nach Party')) { res.push({ before: c, open: true }); return; }
+    const ins = {};
+    for (const b of data.bookings) {
+      if (b.clientTs <= c.clientTs || b.clientTs > next.clientTs) continue;
+      if (b.kind === 'in' || (b.kind === 'undo' && byId[b.ref]?.kind === 'in')) ins[b.itemId] = (ins[b.itemId] || 0) + b.delta;
+    }
+    const per = {};
+    for (const id of Object.keys(c.counted || {})) if (id in (next.counted || {})) per[id] = c.counted[id] + (ins[id] || 0) - next.counted[id];
+    res.push({ before: c, after: next, sum: aggregate(per), bought: aggregate(ins) });
+  });
+  return res.reverse();
+}
+const partyName = (p) => { const n = (p.after || p.before).label.split(':').slice(1).join(':').trim() || p.before.label.split(':').slice(1).join(':').trim(); return n || 'Party'; };
+
+async function loadStats() {
+  const st = state.stats;
+  st.loading = true; st.err = ''; render();
+  try { st.data = await backend.fetchHistory(); st.sel = null; }
+  catch (e) { console.error(e); st.err = 'Konnte Verlauf nicht laden: ' + (e.code || e.message); }
+  st.loading = false; render();
+}
+function catBars(byCat) {
+  const entries = Object.entries(byCat).filter(([, l]) => l > 0.001).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return '';
+  const max = entries[0][1];
+  return `<div class="cat-bars">${entries.map(([c, l]) => `<div class="cbar"><span>${esc(c)}</span><i style="width:${Math.max(4, l / max * 100)}%"></i><b>${fmt(l, 1)} L</b></div>`).join('')}</div>`;
+}
+function topRows(rows, max = 10) {
+  const r = rows.filter(x => x.units > 1e-6).slice(0, max);
+  if (!r.length) return '<p class="hint">Kein Verbrauch in diesem Zeitraum.</p>';
+  return `<ol class="top-list">${r.map(x => `<li><span>${esc(title(x.it))}</span><small>${esc(qtyText(x.it, x.units))}</small><b>${x.liters ? fmt(x.liters, 1) + ' L' : ''}</b></li>`).join('')}</ol>`;
+}
+function renderStats(v) {
+  const st = state.stats;
+  if (!st.data && !st.loading && !st.err) { loadStats(); return; }
+  const tabs = [['week', 'Woche'], ['month', 'Monat'], ['party', 'Partys'], ['log', 'Verlauf']];
+  let html = `<div class="stats-head"><h2>Statistik <span class="beta">BETA</span></h2><button class="btn" type="button" id="statsReload">↻ Aktualisieren</button></div>
+    <p class="hint beta-note">Beta – Werte bitte gegenprüfen. Verbrauch = Austragen + Fehlmengen aus Bestandsaufnahmen. Einkäufe zählen nicht.${st.data && st.data.fromCache ? ' <b>Offline: Stand vom letzten Sync.</b>' : ''}</p>
+    <div class="seg">${tabs.map(([k, l]) => `<button type="button" data-st="${k}" class="${st.tab === k ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+  if (st.loading) html += '<p class="empty">Lade Verlauf …</p>';
+  else if (st.err) html += `<p class="err">${esc(st.err)}</p>`;
+  else if (st.tab === 'week' || st.tab === 'month') html += statsPeriods(st.tab);
+  else if (st.tab === 'party') html += statsParties();
+  else html += statsLog();
+  v.innerHTML = html;
+  v.querySelectorAll('[data-st]').forEach(b => b.onclick = () => { st.tab = b.dataset.st; st.sel = null; render(); });
+  $('#statsReload').onclick = loadStats;
+  v.querySelectorAll('[data-sel]').forEach(b => b.onclick = () => { st.sel = Number(b.dataset.sel); render(); });
+}
+function statsPeriods(kind) {
+  const st = state.stats;
+  const ev = consumptionEvents(st.data);
+  const ps = periods(kind, kind === 'week' ? 8 : 6).map(p => ({ ...p, sum: sumEvents(ev, p.from, p.to) }));
+  const sel = st.sel ?? ps.length - 1;
+  const max = Math.max(1, ...ps.map(p => p.sum.liters));
+  const all = sumEvents(ev, 0, Infinity);
+  let h = `<div class="bars">${ps.map((p, i) => `<button type="button" class="bar ${i === sel ? 'sel' : ''}" data-sel="${i}">
+      <b>${p.sum.liters >= 0.05 ? fmt(p.sum.liters, 0) : ''}</b><i style="height:${Math.max(2, p.sum.liters / max * 100)}%"></i><span>${p.label}</span></button>`).join('')}</div>`;
+  const p = ps[sel];
+  h += `<div class="stat-card"><div class="stat-title">${esc(p.long)}</div><div class="stat-big">${fmt(p.sum.liters, 1)} L</div>
+    ${catBars(p.sum.byCat)}<h3 class="sub">Top-Artikel</h3>${topRows(p.sum.rows)}</div>
+    <div class="stat-card"><div class="stat-title">Gesamt seit Beginn</div><div class="stat-big">${fmt(all.liters, 1)} L</div>${catBars(all.byCat)}
+    <h3 class="sub">Top-Artikel gesamt</h3>${topRows(all.rows)}</div>`;
+  return h;
+}
+function statsParties() {
+  const list = partyList(state.stats.data);
+  if (!list.length) return `<p class="empty">Noch keine Party-Auswertung.</p><p class="hint" style="text-align:center">Vor der Party unter Bestand → <b>📋 Zählen</b> mit „Vor Party“ zählen, danach mit „Nach Party“.</p>`;
+  return list.map(p => p.open
+    ? `<div class="stat-card"><div class="stat-title">${esc(partyName(p))} · ab ${dDate(p.before.clientTs)}</div><p class="hint">„Vor Party“ gezählt am ${dTime(p.before.clientTs)} – Zählung „Nach Party“ fehlt noch.</p></div>`
+    : `<div class="stat-card"><div class="stat-title">${esc(partyName(p))} · ${dDate(p.before.clientTs)}–${dDate(p.after.clientTs)}</div>
+       <div class="stat-big">${fmt(p.sum.liters, 1)} L</div>
+       ${p.bought.rows.length ? `<p class="hint">Dazwischen eingekauft und eingerechnet: ${p.bought.rows.map(x => esc(plain(title(x.it))) + ' ' + esc(qtyText(x.it, x.units))).join(', ')}</p>` : ''}
+       ${catBars(p.sum.byCat)}<h3 class="sub">Verbrauch</h3>${topRows(p.sum.rows, 50)}</div>`).join('');
+}
+function statsLog() {
+  const data = state.stats.data;
+  const kindLabel = (b) => b.kind === 'out' ? 'Ausgetragen' : b.kind === 'in' ? 'Einkauf' : b.kind === 'undo' ? 'Rückgängig'
+    : isInitBooking(b) ? 'Anfangsbestand' : b.session ? 'Bestandsaufnahme' : 'Inventur';
+  const rows = [
+    ...data.bookings.filter(b => getItem(b.itemId)).map(b => ({ ts: b.clientTs, b })),
+    ...data.counts.map(c => ({ ts: c.clientTs, c }))
+  ].sort((a, b) => b.ts - a.ts).slice(0, 150);
+  if (!rows.length) return '<p class="empty">Noch keine Buchungen.</p>';
+  return `<div class="log">${rows.map(r => {
+    if (r.c) return `<div class="log-row count"><small>${dTime(r.ts)}</small><span>📋 ${esc(r.c.label)}</span></div>`;
+    const it = getItem(r.b.itemId), d = r.b.delta;
+    return `<div class="log-row"><small>${dTime(r.ts)}</small><span>${esc(title(it))}<em>${kindLabel(r.b)}</em></span>
+      <b class="${d < 0 ? 'neg' : 'pos'}">${d < 0 ? '−' : '+'}${esc(qtyText(it, Math.abs(d)))}</b></div>`;
+  }).join('')}</div>`;
 }
 
 // ---------- Einkaufsliste ----------
