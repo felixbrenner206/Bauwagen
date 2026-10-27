@@ -29,11 +29,30 @@ export async function init() {
   return { joined: s.joined };
 }
 
-export async function join(code) {
-  if (!code.trim()) throw new Error('Gruppen-Code falsch.');
-  if (code.trim().toLowerCase() === 'falsch') throw new Error('Gruppen-Code falsch.');
-  s.joined = true; save();
+export async function join(code, deviceName) {
+  const c = code.trim().toLowerCase();
+  if (!c || c === 'falsch') throw new Error('Code falsch.');
+  s.joined = true;
+  s.me = { uid: 'me', role: c === 'admin' ? 'admin' : 'member', name: deviceName || '' };
+  save();
 }
+let meCb;
+export function subscribeMe(cb) { meCb = cb; cb({ ...(s.me || { uid: 'me', role: 'member' }) }); }
+export async function upgradeAdmin(code) {
+  if (code.trim().toLowerCase() !== 'admin') throw new Error('Admin-Code falsch.');
+  s.me = { ...(s.me || {}), role: 'admin' }; save(); meCb && meCb({ ...s.me });
+}
+export function setDeviceName(name) { s.me = { ...(s.me || {}), name }; save(); meCb && meCb({ ...s.me }); }
+export function touchLastSeen() {}
+export async function listMembers() {
+  if (!s.members) s.members = [
+    { uid: 'dev2', name: 'Max iPhone', role: 'member', blocked: false, joinedAt: Date.now() - 5 * 86400000, lastSeen: Date.now() - 3600000 },
+    { uid: 'dev3', name: '', role: 'member', blocked: false, joinedAt: Date.now() - 2 * 86400000, lastSeen: Date.now() - 50 * 86400000 }
+  ];
+  return [{ uid: 'me', name: s.me?.name || '', role: s.me?.role || 'member', blocked: false, joinedAt: Date.now(), lastSeen: Date.now() }, ...s.members.map(m => ({ ...m }))];
+}
+export async function setBlocked(id, blocked) { const m = (s.members || []).find(x => x.uid === id); if (m) m.blocked = blocked; save(); }
+export function cancelCount(id) { const c = (s.counts || []).find(x => x.id === id); if (c) c.canceled = true; save(); }
 
 export function subscribe(cb) {
   listener = cb;

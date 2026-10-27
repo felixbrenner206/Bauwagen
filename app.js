@@ -16,6 +16,7 @@ const state = {
   settings: {},      // { ntfyTopic }
   shopChecked: new Set(JSON.parse(localStorage.getItem('bwz.shopChecked') || '[]')),
   stats: { tab: 'week', data: null, loading: false, sel: null, err: '' },
+  me: {},            // eigenes Gerät: { role, name, ... }
   error: ''
 };
 
@@ -34,6 +35,7 @@ function suggestion(it) {
   return b > 0 ? Math.ceil(missing / b) * b : missing;
 }
 const plain = (t) => String(t).replace(/\u00a0/g, ' ');
+const isAdmin = () => state.me.role === 'admin';
 
 // Mehrere Flaschengrößen (Rev. 4): Bestand bleibt in Standardflaschen (z. B. 0,75 L), andere Größen werden umgerechnet
 // → Bestand kann dann krumm sein (1 L Schnaps = 1,333 Standardflaschen). Anzeige dann in Litern.
@@ -100,15 +102,22 @@ function showJoin() {
   $('#app').innerHTML = `
     <form class="center-box" id="joinForm">
       <h1>Bauwagen-Zähler</h1>
-      <p>Gruppen-Code eingeben (einmalig pro Handy, braucht Internet).</p>
-      <input id="joinCode" autocomplete="off" autocapitalize="off" placeholder="Gruppen-Code" required>
+      <p>Code eingeben (einmalig pro Handy, braucht Internet).</p>
+      <input id="joinCode" type="password" autocomplete="off" autocapitalize="off" placeholder="Code" required>
+      <input id="joinName" maxlength="30" autocomplete="off" placeholder="Name des Handys (optional, z. B. „Max iPhone“)">
+      <p class="hint">Der Name ist nur für den Admin in der Geräteliste sichtbar. Buchungen bleiben anonym.</p>
       <button class="btn primary big" type="submit">Beitreten</button>
       <p class="err" id="joinErr"></p>
     </form>`;
   $('#joinForm').onsubmit = async (ev) => {
     ev.preventDefault();
     const btn = $('#joinForm button'); btn.disabled = true; btn.textContent = 'Prüfe …';
-    try { await backend.join($('#joinCode').value); next(); }
+    try {
+      await backend.join($('#joinCode').value, $('#joinName').value);
+      localStorage.setItem('bwz.joinedAt', Date.now());
+      localStorage.removeItem('bwz.tourDone');
+      next();
+    }
     catch (e) { $('#joinErr').textContent = e.message; btn.disabled = false; btn.textContent = 'Beitreten'; }
   };
 }
@@ -116,8 +125,9 @@ function showJoin() {
 function run() {
   $('#app').innerHTML = `
     <header class="top">
-      <div class="title">Bauwagen</div>
-      <button class="sync" id="sync" type="button"></button>
+      <div class="title">Bauwagen<span class="admin-chip" id="adminChip" hidden>ADMIN</span></div>
+      <div class="top-right"><button class="sync" id="sync" type="button"></button>
+      <button class="gear" id="gear" type="button" aria-label="Einstellungen">⚙︎</button></div>
     </header>
     <div class="banner err" id="errBanner" hidden></div>
     <main id="view"></main>
@@ -138,6 +148,16 @@ function run() {
   window.addEventListener('bwz-error', (e) => showError(e.detail));
   backend.subscribe(onData, showError);
   backend.subscribeSettings((st) => { state.settings = st || {}; scheduleAlerts(); });
+  backend.subscribeMe((me) => { state.me = me || {}; $('#adminChip').hidden = !isAdmin(); render(); });
+  backend.touchLastSeen();
+  $('#gear').onclick = openSettings;
+  // Geräte, die schon vor der Hilfe-Funktion beigetreten sind: 4 Wochen Hinweise ab jetzt, aber keine Tour
+  if (!localStorage.getItem('bwz.joinedAt')) { localStorage.setItem('bwz.joinedAt', Date.now()); localStorage.setItem('bwz.tourDone', '1'); }
+  document.addEventListener('click', (e) => {
+    const c = e.target.closest('[data-hint-close]');
+    if (c) { dismissHint(c.dataset.hintClose); c.closest('.hint-card').remove(); }
+  });
+  if (!localStorage.getItem('bwz.tourDone')) setTimeout(startTour, 400);
   setInterval(renderSync, 20000);
   render();
 }
@@ -197,6 +217,7 @@ function render() {
   else if (state.view === 'count') renderCount(v);
   else if (state.view === 'stats') renderStats(v);
   else renderItems(v);
+  addHint(v, state.view);
 }
 
 function groupByCat(list) {
@@ -454,7 +475,7 @@ function renderItems(v) {
       <button class="btn primary" type="button" id="newItem">+ Neuer Artikel</button>
       <button class="btn" type="button" id="minBulk">Mindestbestände</button>
       <button class="btn" type="button" id="sizeBulk">Flaschengrößen</button>
-      <button class="btn" type="button" id="pushSet">Push ${state.settings.ntfyTopic ? '✓' : '⚠︎'}</button>
+
     </div>
     ${noMin ? `<p class="hint">${noMin} Artikel ohne Mindestbestand – die erscheinen nie auf der Einkaufsliste.</p>` : ''}
     <label class="chk" style="margin-top:10px"><input type="checkbox" id="showArch" ${state.showArchived ? 'checked' : ''}> Archivierte zeigen</label>`;
@@ -476,7 +497,7 @@ function renderItems(v) {
   $('#newItem').onclick = () => openItemForm(null);
   $('#minBulk').onclick = openMinBulk;
   $('#sizeBulk').onclick = openSizeBulk;
-  $('#pushSet').onclick = openSettings;
+
   $('#showArch').onchange = (e) => { state.showArchived = e.target.checked; render(); };
   v.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => openItemForm(b.dataset.edit));
 }
@@ -770,7 +791,7 @@ function sumEvents(events, from, to) {
   return aggregate(per);
 }
 function partyList(data) {
-  const counts = [...data.counts].sort((a, b) => a.clientTs - b.clientTs);
+  const counts = data.counts.filter(c => !c.canceled).sort((a, b) => a.clientTs - b.clientTs);
   const byId = Object.fromEntries(data.bookings.map(b => [b.id, b]));
   const res = [];
   counts.forEach((c, i) => {
@@ -853,19 +874,46 @@ function statsParties() {
 }
 function statsLog() {
   const data = state.stats.data;
-  const kindLabel = (b) => b.kind === 'out' ? 'Ausgetragen' : b.kind === 'in' ? 'Einkauf' : b.kind === 'undo' ? 'Rückgängig'
+  const admin = isAdmin();
+  const byId = Object.fromEntries(data.bookings.map(b => [b.id, b]));
+  const undone = new Set(data.bookings.filter(b => b.kind === 'undo' && b.ref).map(b => b.ref));
+  const kindLabel = (b) => b.kind === 'out' ? 'Ausgetragen' : b.kind === 'in' ? 'Einkauf'
+    : b.kind === 'undo' ? (byId[b.ref] && Math.abs(b.clientTs - byId[b.ref].clientTs) > 60000 ? 'Storno' : 'Rückgängig')
     : isInitBooking(b) ? 'Anfangsbestand' : b.session ? 'Bestandsaufnahme' : 'Inventur';
   const rows = [
     ...data.bookings.filter(b => getItem(b.itemId)).map(b => ({ ts: b.clientTs, b })),
     ...data.counts.map(c => ({ ts: c.clientTs, c }))
   ].sort((a, b) => b.ts - a.ts).slice(0, 150);
   if (!rows.length) return '<p class="empty">Noch keine Buchungen.</p>';
-  return `<div class="log">${rows.map(r => {
-    if (r.c) return `<div class="log-row count"><small>${dTime(r.ts)}</small><span>📋 ${esc(r.c.label)}</span></div>`;
-    const it = getItem(r.b.itemId), d = r.b.delta;
-    return `<div class="log-row"><small>${dTime(r.ts)}</small><span>${esc(title(it))}<em>${kindLabel(r.b)}</em></span>
-      <b class="${d < 0 ? 'neg' : 'pos'}">${d < 0 ? '−' : '+'}${esc(qtyText(it, Math.abs(d)))}</b></div>`;
+  const html = `${admin ? '<p class="hint">Admin: Fehlbuchungen mit <b>Storno</b> rückgängig machen. Storno ist selbst eine Buchung – nichts wird gelöscht.</p>' : ''}<div class="log">${rows.map(r => {
+    if (r.c) {
+      const can = admin && !r.c.canceled;
+      return `<div class="log-row count ${r.c.canceled ? 'gone' : ''}"><small>${dTime(r.ts)}</small><span>📋 ${esc(r.c.label)}${r.c.canceled ? '<em>storniert</em>' : ''}</span>
+        ${can ? `<button class="btn mini" type="button" data-storno-count="${esc(r.c.id)}">Storno</button>` : ''}</div>`;
+    }
+    const it = getItem(r.b.itemId), d = r.b.delta, gone = undone.has(r.b.id);
+    const can = admin && !gone && r.b.kind !== 'undo' && !r.b.session;
+    return `<div class="log-row ${gone ? 'gone' : ''}"><small>${dTime(r.ts)}</small><span>${esc(title(it))}<em>${kindLabel(r.b)}${gone ? ' · storniert' : ''}</em></span>
+      <b class="${d < 0 ? 'neg' : 'pos'}">${d < 0 ? '−' : '+'}${esc(qtyText(it, Math.abs(d)))}</b>
+      ${can ? `<button class="btn mini" type="button" data-storno="${esc(r.b.id)}">Storno</button>` : ''}</div>`;
   }).join('')}</div>`;
+  setTimeout(() => {
+    document.querySelectorAll('[data-storno]').forEach(btn => btn.onclick = () => {
+      const b = byId[btn.dataset.storno], it = getItem(b.itemId);
+      if (!confirm(`Buchung stornieren?\n${plain(title(it))}: ${b.delta < 0 ? '−' : '+'}${qtyText(it, Math.abs(b.delta))} (${dTime(b.clientTs)})`)) return;
+      backend.book([{ itemId: b.itemId, delta: -b.delta, kind: 'undo', ref: b.id }]);
+      showSnack('Storniert', null); setTimeout(loadStats, 600);
+    });
+    document.querySelectorAll('[data-storno-count]').forEach(btn => btn.onclick = () => {
+      const c = data.counts.find(x => x.id === btn.dataset.stornoCount);
+      const bs = data.bookings.filter(b => b.session === c.id && !undone.has(b.id));
+      if (!confirm(`Bestandsaufnahme „${c.label}“ (${dTime(c.clientTs)}) stornieren?\n${bs.length} Korrektur(en) werden zurückgebucht.`)) return;
+      if (bs.length) backend.book(bs.map(b => ({ itemId: b.itemId, delta: -b.delta, kind: 'undo', ref: b.id })));
+      backend.cancelCount(c.id);
+      showSnack('Bestandsaufnahme storniert', null); setTimeout(loadStats, 600);
+    });
+  }, 0);
+  return html;
 }
 
 // ---------- Einkaufsliste ----------
@@ -969,7 +1017,82 @@ function randomTopic() {
   for (const x of buf) r += a[x % a.length];
   return 'bauwagen-' + r;
 }
+// ---------- Einstellungen (⚙︎) ----------
 function openSettings() {
+  const d = $('#sheet');
+  delete d.dataset.item;
+  const admin = isAdmin();
+  const days = helpDaysLeft();
+  d.innerHTML = `<div class="form">
+    <div class="sheet-head"><h3>Einstellungen</h3><button class="x" type="button" data-close>✕</button></div>
+
+    <h4 class="set-h">Hilfe</h4>
+    <label class="switch-row"><span>Erklärungen anzeigen<small>${helpMode() === 'auto' ? (days > 0 ? `automatisch noch ${days} Tag${days === 1 ? '' : 'e'}` : 'automatisch aus (4 Wochen vorbei)') : helpMode() === 'on' ? 'immer an' : 'aus'}</small></span>
+      <input type="checkbox" id="setHelp" ${helpActive() ? 'checked' : ''}></label>
+    <button class="btn" type="button" id="setTour">Kurze Einführung nochmal ansehen</button>
+
+    <h4 class="set-h">Dieses Handy</h4>
+    <label>Name (nur für den Admin sichtbar)<input id="setName" maxlength="30" value="${esc(state.me.name || '')}" placeholder="z. B. Max iPhone"></label>
+    <p class="hint">Rolle: <b>${admin ? 'Admin' : 'Mitglied'}</b></p>
+
+    ${admin ? `
+    <h4 class="set-h">Admin</h4>
+    <button class="btn" type="button" id="setPush">Push über ntfy ${state.settings.ntfyTopic ? '✓' : '⚠︎ nicht eingerichtet'}</button>
+    <button class="btn" type="button" id="setDevices">Geräte verwalten</button>
+    <p class="hint">Stornieren alter Buchungen: Statistik → Verlauf.</p>` : `
+    <h4 class="set-h">Admin-Modus</h4>
+    <div class="admin-row"><input id="setAdminCode" type="password" autocomplete="off" placeholder="Admin-Code"><button class="btn" type="button" id="setAdminGo">Aktivieren</button></div>
+    <p class="err" id="setErr"></p>`}
+  </div>`;
+  d.querySelector('[data-close]').onclick = () => d.close();
+  $('#setHelp').onchange = (e) => {
+    localStorage.setItem('bwz.help', e.target.checked ? 'on' : 'off');
+    if (e.target.checked) localStorage.removeItem('bwz.hintsDone');
+    render(); openSettings();
+  };
+  $('#setTour').onclick = () => { d.close(); startTour(); };
+  $('#setName').onchange = (e) => { backend.setDeviceName(e.target.value); showSnack('Name gespeichert', null); };
+  if (admin) {
+    $('#setPush').onclick = openPushSettings;
+    $('#setDevices').onclick = openDevices;
+  } else {
+    $('#setAdminGo').onclick = async () => {
+      const btn = $('#setAdminGo'); btn.disabled = true;
+      try { await backend.upgradeAdmin($('#setAdminCode').value); showSnack('Admin-Modus aktiv', null); openSettings(); }
+      catch (e) { $('#setErr').textContent = e.message; btn.disabled = false; }
+    };
+  }
+  d.onclick = (e) => { if (e.target === d) d.close(); };
+  if (!d.open) d.showModal();
+}
+
+async function openDevices() {
+  const d = $('#sheet');
+  d.innerHTML = `<div class="sheet-head"><div><h3>Geräte</h3><div class="sheet-stock">Gesperrte Geräte können nichts mehr lesen oder buchen.</div></div><button class="x" type="button" data-close>✕</button></div><div id="devList"><p class="hint">Lade …</p></div>
+    <p class="hint">Wer die App-Daten löscht, kann mit dem Gruppen-Code neu beitreten. Wirklich aussperren: zusätzlich den Gruppen-Code in den Firestore-Regeln ändern.</p>`;
+  d.querySelector('[data-close]').onclick = () => d.close();
+  let list;
+  try { list = await backend.listMembers(); }
+  catch (e) { $('#devList').innerHTML = `<p class="err">Geräteliste nicht ladbar (Internet?): ${esc(e.code || e.message)}</p>`; return; }
+  list.sort((a, b) => (b.uid === state.me.uid) - (a.uid === state.me.uid) || (b.lastSeen - a.lastSeen));
+  const draw = () => {
+    $('#devList').innerHTML = list.map(m => `<div class="dev-row ${m.blocked ? 'blocked' : ''}">
+      <div><span class="dev-name"><b>${esc(m.name || 'Unbenanntes Gerät')}</b>${m.role === 'admin' ? ' <span class="admin-chip">ADMIN</span>' : ''}${m.uid === state.me.uid ? ' <span class="badge-me">· dieses Handy</span>' : ''}</span>
+      <small>beigetreten ${m.joinedAt ? dDate(m.joinedAt) : '–'} · zuletzt aktiv ${m.lastSeen ? ago(m.lastSeen) : 'unbekannt'}${m.blocked ? ' · <b>gesperrt</b>' : ''}</small></div>
+      ${m.uid === state.me.uid ? '' : `<button class="btn ${m.blocked ? '' : 'danger'}" type="button" data-block="${esc(m.uid)}">${m.blocked ? 'Entsperren' : 'Sperren'}</button>`}
+    </div>`).join('');
+    $('#devList').querySelectorAll('[data-block]').forEach(btn => btn.onclick = async () => {
+      const m = list.find(x => x.uid === btn.dataset.block);
+      if (!m.blocked && !confirm(`„${m.name || 'Unbenanntes Gerät'}“ sperren?`)) return;
+      btn.disabled = true;
+      try { await backend.setBlocked(m.uid, !m.blocked); m.blocked = !m.blocked; draw(); }
+      catch (e) { showError('Sperren fehlgeschlagen: ' + (e.code || e.message)); btn.disabled = false; }
+    });
+  };
+  draw();
+}
+
+function openPushSettings() {
   const d = $('#sheet');
   delete d.dataset.item;
   const cur = state.settings.ntfyTopic || '';
@@ -977,7 +1100,7 @@ function openSettings() {
     <div class="sheet-head"><h3>Push über ntfy</h3><button class="x" type="button" data-close>✕</button></div>
     <p class="hint">Meldet sofort, wenn ein Artikel unter den Mindestbestand fällt, und einmal im Monat die ganze Einkaufsliste. Gilt für alle Handys der Gruppe.</p>
     <label>Kanalname (wie ein Passwort – nicht öffentlich posten)
-      <input name="topic" value="${esc(cur)}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="bauwagen-…" pattern="[A-Za-z0-9_\\-]{6,64}"></label>
+      <input name="topic" value="${esc(cur)}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="bauwagen-…"></label>
     <button class="btn" type="button" id="genTopic">Zufälligen Namen erzeugen</button>
     <ol class="hint steps-list">
       <li>Namen erzeugen → <b>Speichern</b></li>
@@ -1004,9 +1127,62 @@ function openSettings() {
     state.settings = { ...state.settings, ntfyTopic: t };
     $('#testPush').disabled = !t;
     showSnack('Gespeichert', null);
-    render();
   };
   d.onclick = (e) => { if (e.target === d) d.close(); };
+  if (!d.open) d.showModal();
+}
+
+// ---------- Hilfe: Hinweiskarten + Einführung (4 Wochen ab Beitritt, pro Handy) ----------
+const HELP_DAYS = 28;
+const helpMode = () => localStorage.getItem('bwz.help') || 'auto';     // auto | on | off
+function helpDaysLeft() {
+  const j = Number(localStorage.getItem('bwz.joinedAt')) || Date.now();
+  return Math.max(0, Math.ceil(HELP_DAYS - (Date.now() - j) / DAY));
+}
+function helpActive() {
+  const m = helpMode();
+  return m === 'on' || (m === 'auto' && helpDaysLeft() > 0);
+}
+const hintsDone = () => new Set(JSON.parse(localStorage.getItem('bwz.hintsDone') || '[]'));
+function dismissHint(k) { const s = hintsDone(); s.add(k); localStorage.setItem('bwz.hintsDone', JSON.stringify([...s])); }
+const HINTS = {
+  stock: '<b>Bestand:</b> <b>−1</b> trägt eine Flasche aus. Artikel antippen für mehr: Menge, ganze Kästen, Einbuchen oder Inventur. Rot = unter Mindestbestand. <b>📋 Zählen</b> = Bestandsaufnahme aller Artikel.',
+  buy: '<b>Einkauf:</b> Alles eintragen, was du gekauft hast – Kästen und einzelne Flaschen getrennt – und unten einmal <b>Einkauf buchen</b>.',
+  list: '<b>Einkaufsliste:</b> Hier steht automatisch alles unter Mindestbestand, mit Mengenvorschlag. Beim Einkaufen abhaken, danach <b>Als Einkauf buchen</b>. <b>Teilen</b> schickt die Liste z. B. per WhatsApp.',
+  items: '<b>Artikel:</b> Neue Artikel anlegen, Mindestbestände und Flaschengrößen festlegen. Artikel antippen zum Bearbeiten oder Archivieren.',
+  stats: '<b>Statistik (Beta):</b> Verbrauch pro Woche, Monat und Party. Für die Party-Auswertung vor und nach der Party unter Bestand → 📋 Zählen mit „Vor Party“ bzw. „Nach Party“ zählen.',
+  count: '<b>Bestandsaufnahme:</b> Alles ist mit dem erwarteten Bestand vorausgefüllt. Nur ändern, was nicht stimmt: Feld antippen, gezählte Zahl tippen. Rechts siehst du die Abweichung. Zum Schluss <b>Speichern</b>.'
+};
+function hint(key) {
+  if (!helpActive() || hintsDone().has(key) || !HINTS[key]) return '';
+  return `<div class="hint-card"><span>${HINTS[key]}</span><button type="button" data-hint-close="${key}" aria-label="Hinweis schließen">✕</button></div>`;
+}
+function addHint(v, key) {
+  const h = hint(key);
+  if (h && !v.querySelector('.hint-card')) v.insertAdjacentHTML('afterbegin', h);
+}
+
+const TOUR = [
+  ['🍺', 'Willkommen!', 'Mit der App zählt ihr gemeinsam Getränke und Material im Bauwagen. Alles ist anonym – es wird nicht gespeichert, wer was nimmt.'],
+  ['➖', 'Austragen', 'Auf der Startseite trägt <b>−1</b> eine Flasche aus. Artikel antippen für größere Mengen oder ganze Kästen. Vertippt? Unten erscheint kurz <b>Rückgängig</b>.'],
+  ['🛒', 'Einkaufen', 'Unter <b>Liste</b> steht automatisch, was fehlt. Was du gekauft hast, trägst du unter <b>Einkauf</b> ein – oder hakst es in der Liste ab und buchst es dort.'],
+  ['📋', 'Vor und nach Partys zählen', 'Auf der Startseite <b>📋 Zählen</b>: alle Artikel auf einer Seite, nur Abweichungen ändern. Mit „Vor Party“ und „Nach Party“ rechnet die Statistik den Verbrauch der Party aus.'],
+  ['📶', 'Funktioniert auch ohne Netz', 'Oben siehst du, ob alles synchron ist. Ohne Internet wird lokal gebucht und später automatisch übertragen. Erklärungen kannst du unter <b>⚙︎</b> ein- und ausschalten.']
+];
+function startTour(step = 0) {
+  const d = $('#sheet');
+  delete d.dataset.item;
+  const [icon, h, txt] = TOUR[step];
+  const last = step === TOUR.length - 1;
+  d.innerHTML = `<div class="tour">
+    <div class="tour-icon">${icon}</div><h3>${h}</h3><p>${txt}</p>
+    <div class="tour-dots">${TOUR.map((_, i) => `<i class="${i === step ? 'on' : ''}"></i>`).join('')}</div>
+    <div class="tour-btns"><button class="btn link" type="button" id="tourSkip">${last ? '' : 'Überspringen'}</button>
+      <button class="btn primary" type="button" id="tourNext">${last ? 'Los geht’s' : 'Weiter'}</button></div></div>`;
+  const done = () => { localStorage.setItem('bwz.tourDone', '1'); d.close(); };
+  $('#tourNext').onclick = () => last ? done() : startTour(step + 1);
+  $('#tourSkip').onclick = done;
+  d.onclick = null;
   if (!d.open) d.showModal();
 }
 

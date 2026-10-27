@@ -33,22 +33,72 @@ export async function init() {
   return { joined };
 }
 
-export async function join(code) {
+// Ein Passwortfeld: Gruppen-Code → Mitglied, Admin-Code → Admin. Welcher Code gilt, entscheiden die Firestore-Regeln:
+// erst als Admin versuchen, bei Ablehnung als Mitglied. Die App selbst kennt keinen der beiden Codes.
+export async function join(code, deviceName) {
   if (!navigator.onLine) throw new Error('Zum ersten Beitreten wird Internet gebraucht.');
+  code = code.trim();
   try {
     if (!auth.currentUser) await signInAnonymously(auth);
     uid = auth.currentUser.uid;
     const ref = doc(db, 'members', uid);
-    let exists = false;
-    try { exists = (await getDocFromServer(ref)).exists(); } catch (e) { /* noch kein Mitglied → permission-denied ist normal */ }
-    if (!exists) await setDoc(ref, { code: code.trim(), joinedAt: serverTimestamp() });
+    let snap = null;
+    try { snap = await getDocFromServer(ref); } catch (e) { /* noch kein Mitglied */ }
+    if (snap && snap.exists()) {
+      if (snap.data().blocked) throw new Error('Dieses Gerät wurde vom Admin gesperrt.');
+    } else {
+      const base = { code, joinedAt: serverTimestamp(), lastSeen: serverTimestamp(), name: String(deviceName || '').trim().slice(0, 30) };
+      try { await setDoc(ref, { ...base, role: 'admin' }); }
+      catch (e) {
+        if (e.code !== 'permission-denied') throw e;
+        await setDoc(ref, { ...base, role: 'member' });
+      }
+    }
     localStorage.setItem('bwz.joined', uid);
   } catch (e) {
-    if (e && e.code === 'permission-denied') throw new Error('Gruppen-Code falsch.');
+    if (e instanceof Error && !e.code) throw e;
+    if (e && e.code === 'permission-denied') throw new Error('Code falsch.');
     if (e && e.code === 'auth/admin-restricted-operation') throw new Error('Anonyme Anmeldung ist in Firebase nicht aktiviert.');
     if (e && e.code === 'auth/network-request-failed') throw new Error('Keine Verbindung zu Firebase.');
     throw new Error('Beitritt fehlgeschlagen: ' + (e && (e.code || e.message)));
   }
+}
+
+// ---------- Eigenes Gerät: Rolle, Name, zuletzt aktiv ----------
+export function subscribeMe(cb) {
+  if (!uid) return;
+  onSnapshot(doc(db, 'members', uid), (s) => cb({ uid, ...(s.exists() ? s.data() : {}) }), (e) => console.warn(e));
+}
+export async function upgradeAdmin(code) {
+  if (!navigator.onLine) throw new Error('Dafür wird Internet gebraucht.');
+  try { await updateDoc(doc(db, 'members', uid), { code: code.trim(), role: 'admin' }); }
+  catch (e) { throw new Error(e.code === 'permission-denied' ? 'Admin-Code falsch.' : 'Fehler: ' + (e.code || e.message)); }
+}
+export function setDeviceName(name) {
+  updateDoc(doc(db, 'members', uid), { name: String(name || '').trim().slice(0, 30) }).catch(e => console.warn(e));
+}
+export function touchLastSeen() {
+  const k = 'bwz.lastSeenPing', last = Number(localStorage.getItem(k)) || 0;
+  if (Date.now() - last < 6 * 3600000) return;            // höchstens alle 6 h → spart Schreibvorgänge
+  updateDoc(doc(db, 'members', uid), { lastSeen: serverTimestamp() })
+    .then(() => localStorage.setItem(k, Date.now())).catch(() => {});
+}
+
+// ---------- Admin ----------
+export async function listMembers() {
+  const snap = await getDocs(collection(db, 'members'));
+  return snap.docs.map(d => {
+    const x = d.data();
+    return { uid: d.id, name: x.name || '', role: x.role || 'member', blocked: !!x.blocked,
+      joinedAt: x.joinedAt?.toMillis?.() || 0, lastSeen: x.lastSeen?.toMillis?.() || 0 };
+  });
+}
+export async function setBlocked(memberUid, blocked) {
+  await updateDoc(doc(db, 'members', memberUid), { blocked });
+}
+export function cancelCount(id) {
+  updateDoc(doc(db, 'counts', id), { canceled: true })
+    .catch(err => window.dispatchEvent(new CustomEvent('bwz-error', { detail: 'Storno abgelehnt: ' + (err.code || err.message) })));
 }
 
 // cb({ items, pending, connected }) wird bei jeder Änderung aufgerufen
@@ -66,7 +116,7 @@ export function subscribe(cb, onError) {
     console.error(e);
     if (e && e.code === 'permission-denied') {
       localStorage.removeItem('bwz.joined');
-      onError && onError('Kein Zugriff mehr (Gruppen-Code?). Bitte neu beitreten.');
+      onError && onError('Kein Zugriff (Gerät gesperrt oder Gruppen-Code geändert). App neu öffnen und Code eingeben.');
     } else onError && onError('Fehler: ' + (e && (e.code || e.message)));
   };
 

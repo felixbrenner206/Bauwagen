@@ -223,3 +223,35 @@ select { font: inherit; color: var(--text); background: var(--card); border: 1px
 .log-row b.pos { color: var(--ok); }
 .log-row.count { border-color: var(--accent); }
 .count-name { flex: 1 1 130px; }
+
+/* Einstellungen, Admin, Hilfe */
+.top-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.gear { width: 36px; height: 32px; border-radius: 999px; background: var(--btn); font-size: 18px; flex: none; }
+.admin-chip { font-size: 10px; font-weight: 800; letter-spacing: 1px; background: var(--accent); color: var(--accent-text); padding: 2px 6px; border-radius: 5px; margin-left: 6px; vertical-align: middle; }
+.set-h { margin: 8px 0 -4px; font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+.switch-row { display: flex !important; justify-content: space-between; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; color: var(--text) !important; font-size: 16px !important; }
+.switch-row span { display: grid; }
+.switch-row small { color: var(--muted); font-weight: 400; font-size: 13px; }
+.switch-row input { width: 22px; height: 22px; accent-color: var(--accent); flex: none; }
+.admin-row { display: flex; gap: 8px; }
+.admin-row .btn { white-space: nowrap; }
+.dev-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.dev-row > div { display: grid; min-width: 0; }
+.dev-row small { color: var(--muted); font-size: 12px; }
+.dev-row.blocked { opacity: .6; }
+.badge-me { font-size: 11px; color: var(--ok); font-weight: 700; }
+.btn.mini { padding: 4px 10px; font-size: 13px; grid-column: 2; justify-self: end; margin-top: 4px; }
+.log-row.gone span, .log-row.gone b { text-decoration: line-through; opacity: .55; }
+.hint-card { display: flex; gap: 10px; align-items: flex-start; margin: 12px 0 0; padding: 12px 12px 12px 14px; border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); font-size: 14px; line-height: 1.45; }
+.hint-card button { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--btn); font-size: 13px; }
+.tour { text-align: center; padding: 10px 6px 4px; }
+.tour-icon { font-size: 52px; line-height: 1; margin: 6px 0 10px; }
+.tour h3 { margin: 0 0 8px; font-size: 21px; }
+.tour p { margin: 0 auto; max-width: 420px; line-height: 1.5; color: var(--text); }
+.tour-dots { display: flex; justify-content: center; gap: 6px; margin: 18px 0; }
+.tour-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.tour-dots i.on { background: var(--accent); width: 22px; border-radius: 4px; }
+.tour-btns { display: flex; justify-content: space-between; gap: 10px; }
+.tour-btns .btn.link { width: auto; }
+.tour-btns .btn.primary { flex: 1; max-width: 220px; margin-left: auto; padding: 14px; }
