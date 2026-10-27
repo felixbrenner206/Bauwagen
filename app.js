@@ -1,5 +1,7 @@
 // Bauwagen-Zähler – Etappe 1: Bestand, Austragen, Einkauf, Inventur, Artikelverwaltung, Offline-Sync
-const DEMO = new URLSearchParams(location.search).has('demo');
+const PARAMS = new URLSearchParams(location.search);
+const DEMO = PARAMS.has('demo');
+const IMPORT = PARAMS.has('import');
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n, d = 2) => Number(n).toLocaleString('de-DE', { maximumFractionDigits: d });
@@ -18,7 +20,7 @@ const isDrink = (it) => it.type === 'drink';
 const bigSize = (it) => (isDrink(it) ? Number(it.perCase) : Number(it.packSize)) || 0;
 const bigWord = (it, n) => isDrink(it) ? (n === 1 ? 'Kasten' : 'Kästen') : (n === 1 ? 'Packung' : 'Packungen');
 const smallWord = (it, n) => isDrink(it) ? (n === 1 ? 'Flasche' : 'Flaschen') : 'Stück';
-const title = (it) => (isDrink(it) && it.sizeL ? `${it.name} ${fmt(it.sizeL, 3)} L` : it.name);
+const title = (it) => (isDrink(it) && it.sizeL ? `${it.name}\u00a0${fmt(it.sizeL, 3)}\u00a0L` : it.name);  // geschützte Leerzeichen: Gebinde bricht nicht um
 const below = (it) => typeof it.minStock === 'number' && it.stock < it.minStock;
 
 function qtyText(it, n) {
@@ -62,8 +64,9 @@ async function start() {
   try { ({ joined } = await backend.init()); }
   catch (e) { console.error(e); return fatal('Start fehlgeschlagen: ' + esc(e.message)); }
   if (!joined) return showJoin();
-  run();
+  next();
 }
+function next() { IMPORT ? showImport() : run(); }
 
 function fatal(html) {
   $('#app').innerHTML = `<div class="center-box"><h1>Bauwagen-Zähler</h1><p>${html}</p></div>`;
@@ -81,7 +84,7 @@ function showJoin() {
   $('#joinForm').onsubmit = async (ev) => {
     ev.preventDefault();
     const btn = $('#joinForm button'); btn.disabled = true; btn.textContent = 'Prüfe …';
-    try { await backend.join($('#joinCode').value); run(); }
+    try { await backend.join($('#joinCode').value); next(); }
     catch (e) { $('#joinErr').textContent = e.message; btn.disabled = false; btn.textContent = 'Beitreten'; }
   };
 }
@@ -490,6 +493,64 @@ function openItemForm(id) {
   };
   d.onclick = (e) => { if (e.target === d) d.close(); };
   if (!d.open) d.showModal();
+}
+
+// ---------- Einmaliger Import (…/?import) ----------
+async function showImport() {
+  const { IMPORT_ITEMS } = await import('./import-data.js');
+  const app = $('#app');
+  app.innerHTML = `<main class="import"><h1>Artikel-Import</h1><p id="impStatus" class="hint">Lade aktuellen Bestand vom Server …</p><div id="impBody"></div></main>`;
+  let phase = 'wait';          // wait → preview → sending → done
+  let latest = { items: [], connected: false };
+  const key = (n) => String(n).trim().toLowerCase();
+  backend.subscribe((d) => {
+    latest = d;
+    if (phase === 'wait' && d.connected) { phase = 'preview'; renderPreview(); }
+    if (phase === 'sending' && d.connected) { phase = 'done'; renderDone(); }
+  }, (msg) => { $('#impStatus').textContent = msg; });
+
+  function renderPreview() {
+    const existing = new Map(latest.items.map(i => [key(i.name), i]));
+    const listNames = new Set(IMPORT_ITEMS.map(i => key(i.name)));
+    const toCreate = IMPORT_ITEMS.filter(i => !existing.has(key(i.name)));
+    const skipped = IMPORT_ITEMS.filter(i => existing.has(key(i.name)));
+    const others = latest.items.filter(i => !i.archived && !listNames.has(key(i.name)));
+    let html = `<p class="hint">${toCreate.length} neue Artikel werden angelegt (Mindestbestand 0, später nachtragen).</p>`;
+    for (const [cat, its] of groupByCat(toCreate)) {
+      html += `<h2 class="cat">${esc(cat)}</h2>` + its.map(it =>
+        `<div class="imp-row"><span>${esc(title(it))}</span><b>${esc(qtyText(it, it.stock))}</b></div>`).join('');
+    }
+    if (skipped.length) html += `<h2 class="cat">Schon vorhanden – wird übersprungen</h2><p class="hint">${skipped.map(i => esc(i.name)).join(', ')}</p>`;
+    if (others.length) {
+      html += `<h2 class="cat">Andere vorhandene Artikel</h2><p class="hint">Nicht in der Liste (z. B. Testartikel). Angehakte werden archiviert:</p>` +
+        others.map(i => `<label class="imp-row chk"><input type="checkbox" data-arch="${esc(i.id)}" checked> ${esc(title(i))}</label>`).join('');
+    }
+    html += `<button class="btn primary big" id="impGo" ${toCreate.length || others.length ? '' : 'disabled'}>Importieren</button>
+      <a class="btn link" href="./">Abbrechen</a>`;
+    $('#impStatus').textContent = '';
+    $('#impBody').innerHTML = html;
+    $('#impGo').onclick = () => {
+      $('#impGo').disabled = true;
+      const entries = [];
+      for (const it of toCreate) {
+        const { stock, ...fields } = it;
+        const id = backend.saveItem(fields, null);
+        if (stock > 0) entries.push({ itemId: id, delta: stock, kind: 'correction', target: stock });
+      }
+      if (entries.length) backend.book(entries);
+      document.querySelectorAll('[data-arch]:checked').forEach(c => backend.saveItem({ archived: true }, c.dataset.arch));
+      phase = 'sending';
+      $('#impBody').innerHTML = '';
+      $('#impStatus').textContent = 'Übertrage zur Cloud … (Seite offen lassen)';
+      if (latest.connected && !entries.length && !toCreate.length) { phase = 'done'; renderDone(); }
+    };
+  }
+  function renderDone() {
+    $('#impStatus').innerHTML = '';
+    $('#impBody').innerHTML = `<div class="center-box" style="margin-top:20px"><p><b>✓ Import fertig und synchronisiert.</b></p>
+      <p>Diese Seite kannst du schließen. Die App auf dem Homescreen zeigt die Artikel nach dem nächsten Öffnen.</p>
+      <a class="btn primary big" href="./${DEMO ? '?demo' : ''}">Zur App</a></div>`;
+  }
 }
 
 start();
