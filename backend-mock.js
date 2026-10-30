@@ -133,6 +133,12 @@ export async function updateAlerts(mutator) {
   m.alerts = res.data; localStorage.setItem(MKEY, JSON.stringify(m));
   return res.result;
 }
+let aliasCb;
+export function subscribeAliases(cb) { aliasCb = cb; cb(readMeta().aliases || {}); }
+export function saveAliases(partial) {
+  const m = readMeta(); m.aliases = { ...(m.aliases || {}), ...partial };
+  localStorage.setItem(MKEY, JSON.stringify(m)); aliasCb && aliasCb(m.aliases);
+}
 export function logPush(msg) {
   const log = JSON.parse(localStorage.getItem('bwz.demo.pushlog') || '[]');
   log.push({ ...msg, ts: Date.now() }); localStorage.setItem('bwz.demo.pushlog', JSON.stringify(log));

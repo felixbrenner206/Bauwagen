@@ -227,3 +227,14 @@ export async function fetchHistory() {
     fromCache: b.metadata.fromCache
   };
 }
+
+// ---------- Gelernte Bon-Zuordnungen (für alle Geräte gemeinsam) ----------
+// meta/aliases = { map: { "oett_pils": { id: <Artikel-ID oder "-">, u: Flaschen pro Bon-Einheit } } }
+export function subscribeAliases(cb) {
+  onSnapshot(doc(db, 'meta', 'aliases'), (snap) => cb((snap.exists() && snap.data().map) || {}), (e) => console.warn(e));
+}
+export function saveAliases(partial) {
+  if (!Object.keys(partial).length) return;
+  setDoc(doc(db, 'meta', 'aliases'), { map: partial }, { merge: true })
+    .catch(err => console.warn('Zuordnungen nicht gespeichert', err));
+}

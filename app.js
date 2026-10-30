@@ -1,5 +1,6 @@
 // Bauwagen-Zähler – Etappe 1–3: Bestand, Austragen, Einkauf, Inventur, Artikel, Offline-Sync, Einkaufsliste, Push (ntfy),
 // Bestandsaufnahme, mehrere Flaschengrößen, Statistik (Beta)
+import { parseReceipt, suggestParts } from './receipt.js';
 const PARAMS = new URLSearchParams(location.search);
 const DEMO = PARAMS.has('demo');
 const IMPORT = PARAMS.has('import');
@@ -17,6 +18,8 @@ const state = {
   shopChecked: new Set(JSON.parse(localStorage.getItem('bwz.shopChecked') || '[]')),
   stats: { tab: 'week', data: null, loading: false, sel: null, err: '' },
   me: {},            // eigenes Gerät: { role, name, ... }
+  aliases: {},       // gelernte Bon-Zuordnungen
+  scan: null,        // Bon-Scan: { step, text, rows, stamp }
   error: ''
 };
 
@@ -150,6 +153,7 @@ function run() {
   window.addEventListener('bwz-error', (e) => showError(e.detail));
   backend.subscribe(onData, showError);
   backend.subscribeSettings((st) => { state.settings = st || {}; scheduleAlerts(); });
+  backend.subscribeAliases((a) => { state.aliases = a || {}; });
   backend.subscribeMe((me) => {
     state.me = me || {}; $('#adminChip').hidden = !isAdmin(); render();
     // Geräte, die vor der Namens-Pflicht beigetreten sind: einmal nach dem Namen fragen
@@ -213,7 +217,8 @@ function render() {
   const v = $('#view'); if (!v) return;
   if (state.view !== 'buy') delete v.dataset.buyKey;
   if (state.view !== 'count') delete v.dataset.count;
-  document.body.classList.toggle('counting', state.view === 'count');
+  if (state.view !== 'scan') delete v.dataset.scan;
+  document.body.classList.toggle('counting', state.view === 'count' || state.view === 'scan');
   const lowCount = active().filter(below).length;
   const badge = $('#listBadge');
   if (badge) { badge.hidden = !lowCount; badge.textContent = lowCount; }
@@ -221,6 +226,7 @@ function render() {
   else if (state.view === 'buy') renderBuy(v);
   else if (state.view === 'list') renderList(v);
   else if (state.view === 'count') renderCount(v);
+  else if (state.view === 'scan') renderScan(v);
   else if (state.view === 'stats') renderStats(v);
   else renderItems(v);
   addHint(v, state.view);
@@ -429,7 +435,8 @@ function renderBuy(v) {
     return;
   }
   v.dataset.buyKey = key;
-  let html = `<p class="hint pad">Eingekaufte Mengen eintragen, dann unten buchen.</p>`;
+  let html = `<div class="buy-head"><p class="hint">Eingekaufte Mengen eintragen, dann unten buchen.</p>
+    <button class="btn primary" type="button" id="startScan">📷 Bon scannen</button></div>`;
   for (const [cat, its] of groupByCat(items)) {
     html += `<h2 class="cat">${esc(cat)}</h2>`;
     for (const it of its) {
@@ -451,6 +458,7 @@ function renderBuy(v) {
     });
   });
   $('#buyGo').onclick = submitBuy;
+  $('#startScan').onclick = startScan;
   updateBuySum();
 }
 function cartEntries() {
@@ -929,6 +937,163 @@ function statsLog() {
   return html;
 }
 
+// ---------- Bon scannen (Lastenheft Rev. 7) ----------
+// Schritt 1: Text des Bons holen (iPhone „Text scannen“ oder Live Text aus dem Foto kopieren)
+// Schritt 2: Prüfseite – jede Zeile Artikel + Menge bestätigen/ändern, dann als Einkauf buchen
+// Gelernte Zuordnungen (meta/aliases) gelten für alle Geräte.
+function startScan() {
+  state.scan = { step: 'input', text: '', rows: [], stamp: 1 };
+  state.view = 'scan'; render(); window.scrollTo(0, 0);
+}
+function closeScan(msg) {
+  state.scan = null; state.view = 'buy'; delete $('#view').dataset.buyKey; render(); window.scrollTo(0, 0);
+  if (msg) showSnack(msg, null);
+}
+function renderScan(v) {
+  const sc = state.scan;
+  if (!sc) { state.view = 'buy'; return render(); }
+  if (v.dataset.scan === String(sc.stamp)) return;          // Sync-Updates zerstören keine Eingaben
+  v.dataset.scan = String(sc.stamp);
+  if (sc.step === 'input') return renderScanInput(v);
+  renderScanReview(v);
+}
+function renderScanInput(v) {
+  const sc = state.scan;
+  v.innerHTML = `<div class="count-head">
+      <div class="count-top"><h2>Bon scannen</h2><button class="btn link" type="button" id="scanCancel">Abbrechen</button></div>
+    </div>
+    <textarea id="scanText" rows="9" placeholder="Hier kommt der Text vom Kassenbon rein …" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(sc.text)}</textarea>
+    <div class="scan-btns">
+      <button class="btn" type="button" id="scanPaste">📋 Einfügen</button>
+      <button class="btn primary" type="button" id="scanGo">Auswerten</button>
+    </div>
+    <p class="err" id="scanErr"></p>
+    <div class="stat-card scan-help">
+      <div class="stat-title">So kommt der Text rein (iPhone)</div>
+      <ol class="steps-list hint">
+        <li><b>Foto (am besten bei langen Bons):</b> Bon flach hinlegen und fotografieren → Foto in der Fotos-App öffnen → unten rechts das <b>Text-Symbol</b> antippen → <b>Alle kopieren</b> → hier <b>📋 Einfügen</b>.</li>
+        <li><b>Direkt scannen:</b> ins Textfeld tippen → nochmal tippen → <b>„Text scannen“</b> → Kamera auf den Bon halten → <b>Einsetzen</b>. Lange Bons in mehreren Stücken scannen, der Text wird angehängt.</li>
+      </ol>
+      <p class="hint">Android: Foto mit Google Lens öffnen → „Text“ → alles auswählen → kopieren. Nichts wird hochgeladen – die Auswertung läuft auf dem Handy.</p>
+    </div>`;
+  const ta = $('#scanText');
+  ta.oninput = () => { sc.text = ta.value; };
+  $('#scanCancel').onclick = () => closeScan();
+  $('#scanPaste').onclick = async () => {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (!t.trim()) throw new Error('leer');
+      ta.value = (ta.value.trim() ? ta.value.trimEnd() + '\n' : '') + t; sc.text = ta.value;
+      $('#scanErr').textContent = '';
+    } catch (e) { $('#scanErr').textContent = 'Einfügen nicht möglich – lange ins Textfeld tippen und „Einsetzen“ wählen.'; }
+  };
+  $('#scanGo').onclick = () => {
+    sc.text = ta.value;
+    const rows = parseReceipt(sc.text, active(), state.aliases);
+    if (!rows.length) { $('#scanErr').textContent = 'Keine Artikel im Text gefunden. Ist der ganze Bon drin?'; return; }
+    sc.rows = rows.map((r, i) => {
+      const it = r.itemId ? getItem(r.itemId) : null;
+      return { ...r, n: i, include: !!it, auto: r.itemId, parts: suggestParts(r, it) };
+    });
+    sc.step = 'review'; sc.stamp++; render(); window.scrollTo(0, 0);
+  };
+}
+function itemOptions(sel) {
+  let h = `<option value="">– nicht übernehmen –</option>`;
+  for (const [cat, its] of groupByCat(active())) {
+    h += `<optgroup label="${esc(cat)}">` + its.map(i => `<option value="${esc(i.id)}" ${i.id === sel ? 'selected' : ''}>${esc(plain(title(i)))}</option>`).join('') + '</optgroup>';
+  }
+  return h;
+}
+function scanRowHtml(r) {
+  const it = r.itemId ? getItem(r.itemId) : null;
+  const q = it ? partsQty(it, r.parts) : 0;
+  return `<div class="scan-row ${r.include && it ? '' : 'off'} ${r.conf === 'check' && r.itemId === r.auto ? 'chk-warn' : ''}" data-n="${r.n}">
+    <div class="scan-top">
+      <input type="checkbox" data-inc ${r.include && it ? 'checked' : ''} ${it ? '' : 'disabled'} aria-label="übernehmen">
+      <select data-item>${itemOptions(r.itemId)}</select>
+    </div>
+    <small class="scan-raw">${r.manual ? 'von Hand hinzugefügt' : `Bon: „${esc(r.raw)}“`}${r.conf === 'check' && r.itemId === r.auto ? ' · <b class="warn">bitte prüfen</b>' : ''}</small>
+    ${it ? `<div class="buy-steps">${qtySteppers(it, r.parts)}</div><small class="scan-sum">${q > 0 ? '+ ' + esc(qtyText(it, q)) + (isDrink(it) && it.sizeL ? ' = ' + fmt(q * it.sizeL) + ' L' : '') : 'Menge 0 – wird nicht gebucht'}</small>` : ''}
+  </div>`;
+}
+function renderScanReview(v) {
+  const sc = state.scan;
+  const matched = sc.rows.filter(r => r.itemId), open = sc.rows.filter(r => !r.itemId);
+  const nCheck = matched.filter(r => r.conf === 'check' && r.itemId === r.auto).length;
+  v.innerHTML = `<div class="count-head">
+      <div class="count-top"><h2>Bon prüfen</h2><button class="btn link" type="button" id="scanBack">← Text</button></div>
+      <p class="hint">${matched.length} Artikel erkannt${nCheck ? `, davon <b class="warn">${nCheck} bitte prüfen</b>` : ''}. Artikel und Mengen kontrollieren, Häkchen weg = wird nicht gebucht.</p>
+    </div>
+    <div id="scanMatched">${matched.map(scanRowHtml).join('') || '<p class="hint">Nichts automatisch erkannt – unten zuordnen.</p>'}</div>
+    <button class="btn" type="button" id="scanAdd">+ Artikel hinzufügen</button>
+    ${open.length ? `<h2 class="cat">Nicht zugeordnet (${open.length})</h2><p class="hint">Gehört eine Zeile zu einem Artikel? Auswählen – die App merkt es sich für den nächsten Bon.</p>
+      <div id="scanOpen">${open.map(scanRowHtml).join('')}</div>` : ''}
+    <div class="buy-bar count-bar"><span id="scanSum"></span><button class="btn primary" type="button" id="scanBook">Einkauf buchen</button></div>`;
+  v.querySelectorAll('.scan-row').forEach(el => {
+    const r = sc.rows[Number(el.dataset.n)];
+    el.querySelector('[data-item]').onchange = (e) => {
+      r.itemId = e.target.value || null;
+      r.include = !!r.itemId;
+      const it = r.itemId ? getItem(r.itemId) : null;
+      r.parts = r.manual ? { big: 0, small: 0, alt: {} } : suggestParts({ ...r, alias: r.alias && r.alias.id === r.itemId ? r.alias : null }, it);
+      if (r.itemId && r.itemId !== r.auto) r.conf = 'user';
+      sc.stamp++; render();
+    };
+    const cb = el.querySelector('[data-inc]');
+    cb.onchange = () => { r.include = cb.checked; el.classList.toggle('off', !cb.checked); updateScanSum(); };
+    const it = r.itemId ? getItem(r.itemId) : null;
+    if (it) wireSteppers(el, () => {
+      r.parts = readParts(el, it);
+      const q = partsQty(it, r.parts);
+      el.querySelector('.scan-sum').textContent = q > 0 ? '+ ' + plain(qtyText(it, q)) + (isDrink(it) && it.sizeL ? ' = ' + fmt(q * it.sizeL) + ' L' : '') : 'Menge 0 – wird nicht gebucht';
+      updateScanSum();
+    });
+  });
+  $('#scanBack').onclick = () => { sc.step = 'input'; sc.stamp++; render(); };
+  $('#scanAdd').onclick = () => {
+    sc.rows.push({ n: sc.rows.length, raw: '', key: '', manual: true, itemId: null, include: false, conf: 'user', qty: 1, parts: { big: 0, small: 0, alt: {} } });
+    sc.stamp++; render();
+    const last = [...document.querySelectorAll('.scan-row')].find(x => Number(x.dataset.n) === sc.rows.length - 1);
+    last && last.querySelector('select').focus();
+  };
+  $('#scanBook').onclick = bookScan;
+  updateScanSum();
+}
+function scanEntries() {
+  const per = {};
+  for (const r of state.scan.rows) {
+    if (!r.include || !r.itemId) continue;
+    const it = getItem(r.itemId); if (!it) continue;
+    const q = partsQty(it, r.parts);
+    if (q > 0) per[it.id] = r4((per[it.id] || 0) + q);
+  }
+  return Object.entries(per).map(([itemId, delta]) => ({ itemId, delta, kind: 'in' }));
+}
+function updateScanSum() {
+  const e = scanEntries();
+  const liters = e.reduce((a, x) => { const it = getItem(x.itemId); return a + (isDrink(it) && it.sizeL ? x.delta * it.sizeL : 0); }, 0);
+  $('#scanSum').textContent = e.length ? `${e.length} Artikel${liters ? ' · ' + fmt(liters, 1) + ' L' : ''}` : 'Nichts ausgewählt';
+  $('#scanBook').disabled = !e.length;
+}
+function bookScan() {
+  const sc = state.scan, e = scanEntries();
+  if (!e.length) return;
+  // Lernen: Bon-Text → Artikel (+ Flaschen pro Bon-Einheit); abgewählte Vorschläge → künftig ignorieren
+  const learn = {};
+  for (const r of sc.rows) {
+    if (r.manual || !r.key || r.key.length < 3) continue;
+    const it = r.itemId ? getItem(r.itemId) : null;
+    if (it && r.include) {
+      const q = partsQty(it, r.parts);
+      if (q > 0) learn[r.key] = { id: it.id, u: r4(q / (r.qty || 1)) };
+    } else if (r.auto && (!r.include || !r.itemId)) learn[r.key] = { id: '-', u: 0 };
+  }
+  backend.saveAliases(learn);
+  doBook(e, `Bon gebucht (${e.length} Artikel)`);
+  state.scan = null; state.view = 'buy'; delete $('#view').dataset.buyKey; render(); window.scrollTo(0, 0);
+}
+
 // ---------- Einkaufsliste ----------
 function saveChecked() { localStorage.setItem('bwz.shopChecked', JSON.stringify([...state.shopChecked])); }
 function lowItems() { return active().filter(below); }
@@ -1204,6 +1369,7 @@ const HINTS = {
   list: '<b>Einkaufsliste:</b> Hier steht automatisch alles unter Mindestbestand, mit Mengenvorschlag. Beim Einkaufen abhaken, danach <b>Als Einkauf buchen</b>. <b>Teilen</b> schickt die Liste z. B. per WhatsApp.',
   items: '<b>Artikel:</b> Neue Artikel anlegen, Mindestbestände und Flaschengrößen festlegen. Artikel antippen zum Bearbeiten oder Archivieren.',
   stats: '<b>Statistik (Beta):</b> Verbrauch pro Woche, Monat und Party. Für die Party-Auswertung vor und nach der Party unter Bestand → 📋 Zählen mit „Vor Party“ bzw. „Nach Party“ zählen.',
+  scan: '<b>Bon scannen:</b> Text vom Kassenbon ins Feld holen (Anleitung unten), dann <b>Auswerten</b>. Danach prüfst du jede Zeile, bevor gebucht wird. Was du einmal zuordnest, erkennt die App beim nächsten Bon automatisch.',
   count: '<b>Bestandsaufnahme:</b> Alles ist mit dem erwarteten Bestand vorausgefüllt. Nur ändern, was nicht stimmt: Feld antippen, gezählte Zahl tippen. Rechts siehst du die Abweichung. Zum Schluss <b>Speichern</b>.'
 };
 function hint(key) {
