@@ -284,3 +284,12 @@ textarea { font: inherit; font-size: 15px; font-family: ui-monospace, SFMono-Reg
 .scan-row .stepper button { width: 38px; height: 38px; font-size: 20px; }
 .scan-row .stepper input { width: 100%; padding: 7px 2px; font-size: 17px; }
 #scanAdd { width: 100%; margin: 4px 0 6px; }
+
+/* Einkauf: Umschalter Von Hand | Bon scannen */
+.buy-mode { margin: 14px 0 4px; }
+.buy-mode button { padding: 11px 4px; font-size: 15px; }
+.scan-steps { display: flex; gap: 6px; margin: 10px 0 2px; font-size: 12px; font-weight: 600; }
+.scan-steps span { flex: 1; text-align: center; padding: 6px 2px; border-radius: 8px; background: var(--btn); color: var(--muted); }
+.scan-steps span.on { background: var(--accent); color: var(--accent-text); }
+.scan-steps span.done { color: var(--ok); cursor: pointer; }
+#scanClear, #scanNew { width: 100%; margin-top: 4px; }

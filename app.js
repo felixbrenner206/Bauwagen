@@ -213,12 +213,13 @@ function renderSync() {
 // ---------- Render ----------
 function render() {
   renderSync();
-  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.view === state.view));
+  const tabView = state.view === 'scan' ? 'buy' : state.view;
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.view === tabView));
   const v = $('#view'); if (!v) return;
   if (state.view !== 'buy') delete v.dataset.buyKey;
   if (state.view !== 'count') delete v.dataset.count;
   if (state.view !== 'scan') delete v.dataset.scan;
-  document.body.classList.toggle('counting', state.view === 'count' || state.view === 'scan');
+  document.body.classList.toggle('counting', state.view === 'count');
   const lowCount = active().filter(below).length;
   const badge = $('#listBadge');
   if (badge) { badge.hidden = !lowCount; badge.textContent = lowCount; }
@@ -435,8 +436,7 @@ function renderBuy(v) {
     return;
   }
   v.dataset.buyKey = key;
-  let html = `<div class="buy-head"><p class="hint">Eingekaufte Mengen eintragen, dann unten buchen.</p>
-    <button class="btn primary" type="button" id="startScan">📷 Bon scannen</button></div>`;
+  let html = buyModeSwitch('manual') + `<p class="hint pad">Eingekaufte Mengen eintragen, dann unten buchen.</p>`;
   for (const [cat, its] of groupByCat(items)) {
     html += `<h2 class="cat">${esc(cat)}</h2>`;
     for (const it of its) {
@@ -458,7 +458,7 @@ function renderBuy(v) {
     });
   });
   $('#buyGo').onclick = submitBuy;
-  $('#startScan').onclick = startScan;
+  wireBuyModeSwitch(v);
   updateBuySum();
 }
 function cartEntries() {
@@ -941,13 +941,29 @@ function statsLog() {
 // Schritt 1: Text des Bons holen (iPhone „Text scannen“ oder Live Text aus dem Foto kopieren)
 // Schritt 2: Prüfseite – jede Zeile Artikel + Menge bestätigen/ändern, dann als Einkauf buchen
 // Gelernte Zuordnungen (meta/aliases) gelten für alle Geräte.
+// Umschalter oben im Einkauf-Reiter: „Von Hand“ | „Bon scannen“. Ein angefangener Bon bleibt erhalten,
+// wenn man kurz zu „Von Hand“ wechselt.
+function buyModeSwitch(mode) {
+  const open = state.scan && (state.scan.text.trim() || state.scan.step === 'review');
+  return `<div class="seg buy-mode">
+    <button type="button" data-bm="manual" class="${mode === 'manual' ? 'active' : ''}">✍️ Von Hand</button>
+    <button type="button" data-bm="scan" class="${mode === 'scan' ? 'active' : ''}">📷 Bon scannen${open && mode !== 'scan' ? ' •' : ''}</button>
+  </div>`;
+}
+function wireBuyModeSwitch(v) {
+  v.querySelectorAll('[data-bm]').forEach(b => b.onclick = () => b.dataset.bm === 'scan' ? startScan() : closeScan());
+}
 function startScan() {
-  state.scan = { step: 'input', text: '', rows: [], stamp: 1 };
+  if (!state.scan) state.scan = { step: 'input', text: '', rows: [], stamp: 1 };
+  state.scan.stamp++;
   state.view = 'scan'; render(); window.scrollTo(0, 0);
 }
-function closeScan(msg) {
-  state.scan = null; state.view = 'buy'; delete $('#view').dataset.buyKey; render(); window.scrollTo(0, 0);
-  if (msg) showSnack(msg, null);
+function closeScan() {
+  state.view = 'buy'; delete $('#view').dataset.buyKey; render(); window.scrollTo(0, 0);
+}
+function newScan() {
+  state.scan = { step: 'input', text: '', rows: [], stamp: (state.scan?.stamp || 1) + 1 };
+  render(); window.scrollTo(0, 0);
 }
 function renderScan(v) {
   const sc = state.scan;
@@ -959,14 +975,14 @@ function renderScan(v) {
 }
 function renderScanInput(v) {
   const sc = state.scan;
-  v.innerHTML = `<div class="count-head">
-      <div class="count-top"><h2>Bon scannen</h2><button class="btn link" type="button" id="scanCancel">Abbrechen</button></div>
-    </div>
+  v.innerHTML = buyModeSwitch('scan') + `
+    <div class="scan-steps"><span class="on">1 Text holen</span><span>2 Prüfen</span><span>3 Buchen</span></div>
     <textarea id="scanText" rows="9" placeholder="Hier kommt der Text vom Kassenbon rein …" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(sc.text)}</textarea>
     <div class="scan-btns">
       <button class="btn" type="button" id="scanPaste">📋 Einfügen</button>
-      <button class="btn primary" type="button" id="scanGo">Auswerten</button>
+      <button class="btn primary" type="button" id="scanGo">Auswerten →</button>
     </div>
+    ${sc.text.trim() ? '<button class="btn link" type="button" id="scanClear">Text leeren</button>' : ''}
     <p class="err" id="scanErr"></p>
     <div class="stat-card scan-help">
       <div class="stat-title">So kommt der Text rein (iPhone)</div>
@@ -978,7 +994,8 @@ function renderScanInput(v) {
     </div>`;
   const ta = $('#scanText');
   ta.oninput = () => { sc.text = ta.value; };
-  $('#scanCancel').onclick = () => closeScan();
+  wireBuyModeSwitch(v);
+  if ($('#scanClear')) $('#scanClear').onclick = newScan;
   $('#scanPaste').onclick = async () => {
     try {
       const t = await navigator.clipboard.readText();
@@ -1021,15 +1038,17 @@ function renderScanReview(v) {
   const sc = state.scan;
   const matched = sc.rows.filter(r => r.itemId), open = sc.rows.filter(r => !r.itemId);
   const nCheck = matched.filter(r => r.conf === 'check' && r.itemId === r.auto).length;
-  v.innerHTML = `<div class="count-head">
-      <div class="count-top"><h2>Bon prüfen</h2><button class="btn link" type="button" id="scanBack">← Text</button></div>
+  v.innerHTML = buyModeSwitch('scan') + `
+    <div class="scan-steps"><span class="done" id="scanBack" role="button">1 Text holen ✓</span><span class="on">2 Prüfen</span><span>3 Buchen</span></div>
+    <div class="count-head">
       <p class="hint">${matched.length} Artikel erkannt${nCheck ? `, davon <b class="warn">${nCheck} bitte prüfen</b>` : ''}. Artikel und Mengen kontrollieren, Häkchen weg = wird nicht gebucht.</p>
     </div>
     <div id="scanMatched">${matched.map(scanRowHtml).join('') || '<p class="hint">Nichts automatisch erkannt – unten zuordnen.</p>'}</div>
     <button class="btn" type="button" id="scanAdd">+ Artikel hinzufügen</button>
     ${open.length ? `<h2 class="cat">Nicht zugeordnet (${open.length})</h2><p class="hint">Gehört eine Zeile zu einem Artikel? Auswählen – die App merkt es sich für den nächsten Bon.</p>
       <div id="scanOpen">${open.map(scanRowHtml).join('')}</div>` : ''}
-    <div class="buy-bar count-bar"><span id="scanSum"></span><button class="btn primary" type="button" id="scanBook">Einkauf buchen</button></div>`;
+    <button class="btn link" type="button" id="scanNew">Bon verwerfen und neu beginnen</button>
+    <div class="buy-bar"><span id="scanSum"></span><button class="btn primary" type="button" id="scanBook">Einkauf buchen</button></div>`;
   v.querySelectorAll('.scan-row').forEach(el => {
     const r = sc.rows[Number(el.dataset.n)];
     el.querySelector('[data-item]').onchange = (e) => {
@@ -1058,6 +1077,8 @@ function renderScanReview(v) {
     last && last.querySelector('select').focus();
   };
   $('#scanBook').onclick = bookScan;
+  $('#scanNew').onclick = () => { if (confirm('Diesen Bon verwerfen?')) newScan(); };
+  wireBuyModeSwitch(v);
   updateScanSum();
 }
 function scanEntries() {
@@ -1091,7 +1112,7 @@ function bookScan() {
   }
   backend.saveAliases(learn);
   doBook(e, `Bon gebucht (${e.length} Artikel)`);
-  state.scan = null; state.view = 'buy'; delete $('#view').dataset.buyKey; render(); window.scrollTo(0, 0);
+  state.scan = null; closeScan();
 }
 
 // ---------- Einkaufsliste ----------
