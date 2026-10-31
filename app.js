@@ -1,6 +1,6 @@
 // Bauwagen-Zähler – Etappe 1–3: Bestand, Austragen, Einkauf, Inventur, Artikel, Offline-Sync, Einkaufsliste, Push (ntfy),
 // Bestandsaufnahme, mehrere Flaschengrößen, Statistik (Beta)
-import { parseReceipt, suggestParts } from './receipt.js';
+import { parseReceipt, suggestParts, mergeTexts, rowsFromAi } from './receipt.js';
 const PARAMS = new URLSearchParams(location.search);
 const DEMO = PARAMS.has('demo');
 const IMPORT = PARAMS.has('import');
@@ -218,7 +218,7 @@ function render() {
   const v = $('#view'); if (!v) return;
   if (state.view !== 'buy') delete v.dataset.buyKey;
   if (state.view !== 'count') delete v.dataset.count;
-  if (state.view !== 'scan') delete v.dataset.scan;
+  if (state.view !== 'scan') { delete v.dataset.scan; stopCamera(); }
   document.body.classList.toggle('counting', state.view === 'count');
   const lowCount = active().filter(below).length;
   const badge = $('#listBadge');
@@ -937,14 +937,20 @@ function statsLog() {
   return html;
 }
 
-// ---------- Bon scannen (Lastenheft Rev. 7) ----------
-// Schritt 1: Text des Bons holen (iPhone „Text scannen“ oder Live Text aus dem Foto kopieren)
-// Schritt 2: Prüfseite – jede Zeile Artikel + Menge bestätigen/ändern, dann als Einkauf buchen
-// Gelernte Zuordnungen (meta/aliases) gelten für alle Geräte.
-// Umschalter oben im Einkauf-Reiter: „Von Hand“ | „Bon scannen“. Ein angefangener Bon bleibt erhalten,
-// wenn man kurz zu „Von Hand“ wechselt.
+// ---------- Bon scannen (Lastenheft Rev. 8) ----------
+// Schritt 1: Bon mit der Live-Kamera in der App fotografieren (bei langen Bons mehrere Abschnitte)
+// Schritt 2: Text erkennen – offline (Tesseract auf dem Handy) oder per KI (Gemini, braucht Netz)
+// Schritt 3: Prüfseite – jede Zeile Artikel + Menge bestätigen/ändern, dann als Einkauf buchen
+// Fotos werden nirgends gespeichert. Gelernte Zuordnungen (meta/aliases) gelten für alle Geräte.
+const MAX_SHOTS = 6;
+let camStream = null;
+function stopCamera() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); else if (state.view === 'scan' && state.scan?.step === 'camera') { state.scan.stamp++; render(); } });
+
 function buyModeSwitch(mode) {
-  const open = state.scan && (state.scan.text.trim() || state.scan.step === 'review');
+  const open = state.scan && (state.scan.shots.length || state.scan.step === 'review');
   return `<div class="seg buy-mode">
     <button type="button" data-bm="manual" class="${mode === 'manual' ? 'active' : ''}">✍️ Von Hand</button>
     <button type="button" data-bm="scan" class="${mode === 'scan' ? 'active' : ''}">📷 Bon scannen${open && mode !== 'scan' ? ' •' : ''}</button>
@@ -953,68 +959,188 @@ function buyModeSwitch(mode) {
 function wireBuyModeSwitch(v) {
   v.querySelectorAll('[data-bm]').forEach(b => b.onclick = () => b.dataset.bm === 'scan' ? startScan() : closeScan());
 }
+const newScanState = (stamp = 1) => ({ step: 'camera', shots: [], text: '', rows: [], engine: '', err: '', stamp });
 function startScan() {
-  if (!state.scan) state.scan = { step: 'input', text: '', rows: [], stamp: 1 };
+  if (!state.scan) state.scan = newScanState();
   state.scan.stamp++;
   state.view = 'scan'; render(); window.scrollTo(0, 0);
+  if (navigator.onLine && !DEMO) import('./ocr.js').then(m => m.preload()).catch(() => {});   // Offline-Erkennung vorab laden
 }
 function closeScan() {
+  stopCamera();
   state.view = 'buy'; delete $('#view').dataset.buyKey; render(); window.scrollTo(0, 0);
 }
 function newScan() {
-  state.scan = { step: 'input', text: '', rows: [], stamp: (state.scan?.stamp || 1) + 1 };
+  stopCamera();
+  state.scan = newScanState((state.scan?.stamp || 1) + 1);
   render(); window.scrollTo(0, 0);
 }
 function renderScan(v) {
   const sc = state.scan;
   if (!sc) { state.view = 'buy'; return render(); }
-  if (v.dataset.scan === String(sc.stamp)) return;          // Sync-Updates zerstören keine Eingaben
+  if (v.dataset.scan === String(sc.stamp)) return;          // Sync-Updates zerstören weder Kamera noch Eingaben
   v.dataset.scan = String(sc.stamp);
-  if (sc.step === 'input') return renderScanInput(v);
+  if (sc.step !== 'camera') stopCamera();
+  if (sc.step === 'camera') return renderScanCamera(v);
   renderScanReview(v);
 }
-function renderScanInput(v) {
+const stepsBar = (n) => `<div class="scan-steps">
+  <span class="${n === 1 ? 'on' : 'done'}" ${n > 1 ? 'id="scanBack" role="button"' : ''}>1 Fotografieren${n > 1 ? ' ✓' : ''}</span>
+  <span class="${n === 2 ? 'on' : ''}">2 Prüfen</span><span>3 Buchen</span></div>`;
+
+function renderScanCamera(v) {
   const sc = state.scan;
-  v.innerHTML = buyModeSwitch('scan') + `
-    <div class="scan-steps"><span class="on">1 Text holen</span><span>2 Prüfen</span><span>3 Buchen</span></div>
-    <textarea id="scanText" rows="9" placeholder="Hier kommt der Text vom Kassenbon rein …" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(sc.text)}</textarea>
-    <div class="scan-btns">
-      <button class="btn" type="button" id="scanPaste">📋 Einfügen</button>
-      <button class="btn primary" type="button" id="scanGo">Auswerten →</button>
+  const n = sc.shots.length;
+  const aiOk = backend.aiAvailable && backend.aiAvailable() && navigator.onLine;
+  v.innerHTML = buyModeSwitch('scan') + stepsBar(1) + `
+    <div class="cam-wrap" id="camWrap">
+      <video id="camVideo" playsinline muted autoplay></video>
+      <div class="cam-frame"><span>${n ? `Nächsten Abschnitt ausrichten – etwas Überlappung ist gut` : `Bon gerade in den Rahmen, gut ausleuchten`}</span></div>
+      <div class="cam-msg" id="camMsg" ${camStream ? 'hidden' : ''}>Kamera wird gestartet …</div>
+      <button class="cam-shutter" type="button" id="camShot" aria-label="Foto aufnehmen" ${n >= MAX_SHOTS ? 'disabled' : ''}></button>
+      <button class="cam-torch" type="button" id="camTorch" hidden aria-label="Licht">🔦</button>
     </div>
-    ${sc.text.trim() ? '<button class="btn link" type="button" id="scanClear">Text leeren</button>' : ''}
-    <p class="err" id="scanErr"></p>
-    <div class="stat-card scan-help">
-      <div class="stat-title">So kommt der Text rein (iPhone)</div>
-      <ol class="steps-list hint">
-        <li><b>Foto (am besten bei langen Bons):</b> Bon flach hinlegen und fotografieren → Foto in der Fotos-App öffnen → unten rechts das <b>Text-Symbol</b> antippen → <b>Alle kopieren</b> → hier <b>📋 Einfügen</b>.</li>
-        <li><b>Direkt scannen:</b> ins Textfeld tippen → nochmal tippen → <b>„Text scannen“</b> → Kamera auf den Bon halten → <b>Einsetzen</b>. Lange Bons in mehreren Stücken scannen, der Text wird angehängt.</li>
-      </ol>
-      <p class="hint">Android: Foto mit Google Lens öffnen → „Text“ → alles auswählen → kopieren. Nichts wird hochgeladen – die Auswertung läuft auf dem Handy.</p>
-    </div>`;
-  const ta = $('#scanText');
-  ta.oninput = () => { sc.text = ta.value; };
+    <input type="file" id="camFile" accept="image/*" capture="environment" hidden>
+    <div class="shots" id="shots">${sc.shots.map((c, i) => `<div class="shot"><img src="${c.thumb}" alt="Foto ${i + 1}"><button type="button" data-del="${i}" aria-label="Foto löschen">✕</button><b>${i + 1}</b></div>`).join('')}</div>
+    <p class="hint">${n ? `${n} Foto${n > 1 ? 's' : ''} – bei langen Bons weitere Abschnitte fotografieren, dann auswerten.` : 'Lange Bons in mehreren Abschnitten von oben nach unten fotografieren.'}</p>
+    <p class="err" id="scanErr">${esc(sc.err || '')}</p>
+    ${n ? `<button class="btn primary big" type="button" id="scanGo">${aiOk ? '🤖 Auswerten' : '📴 Auswerten (offline)'}</button>
+    <p class="hint small">${aiOk ? 'Mit Internet liest die KI den Bon (am genauesten). Klappt das nicht, wird automatisch offline ausgewertet.'
+      : backend.aiAvailable && backend.aiAvailable() ? 'Kein Internet – Auswertung läuft auf dem Handy (etwas ungenauer).' : 'Auswertung läuft auf dem Handy. Beim allerersten Mal ~10 MB Download.'}</p>
+    <div class="scan-links">${aiOk ? '<button class="btn link" type="button" id="scanOffline">Stattdessen offline auswerten</button>' : ''}
+      <button class="btn link" type="button" id="scanClear">Alle Fotos verwerfen</button></div>` : ''}
+    <div class="busy" id="scanBusy" hidden><div class="busy-box"><b id="busyTxt">Lese Bon …</b><div class="bar"><i id="busyBar"></i></div></div></div>`;
   wireBuyModeSwitch(v);
-  if ($('#scanClear')) $('#scanClear').onclick = newScan;
-  $('#scanPaste').onclick = async () => {
-    try {
-      const t = await navigator.clipboard.readText();
-      if (!t.trim()) throw new Error('leer');
-      ta.value = (ta.value.trim() ? ta.value.trimEnd() + '\n' : '') + t; sc.text = ta.value;
-      $('#scanErr').textContent = '';
-    } catch (e) { $('#scanErr').textContent = 'Einfügen nicht möglich – lange ins Textfeld tippen und „Einsetzen“ wählen.'; }
-  };
-  $('#scanGo').onclick = () => {
-    sc.text = ta.value;
-    const rows = parseReceipt(sc.text, active(), state.aliases);
-    if (!rows.length) { $('#scanErr').textContent = 'Keine Artikel im Text gefunden. Ist der ganze Bon drin?'; return; }
+  v.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { sc.shots.splice(Number(b.dataset.del), 1); sc.err = ''; sc.stamp++; render(); });
+  if ($('#scanClear')) $('#scanClear').onclick = () => { if (confirm('Alle Fotos verwerfen?')) newScan(); };
+  if ($('#scanOffline')) $('#scanOffline').onclick = () => analyzeScan('offline');
+  if ($('#scanGo')) $('#scanGo').onclick = () => analyzeScan(aiOk ? 'ai' : 'offline');
+  $('#camShot').onclick = () => takeShot();
+  $('#camFile').onchange = (e) => fileShot(e.target.files && e.target.files[0]);
+  startCamera();
+}
+
+async function startCamera() {
+  const video = $('#camVideo'), msg = $('#camMsg');
+  if (!video) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg.textContent = 'Live-Kamera wird nicht unterstützt – Auslöser öffnet die Kamera.';
+    $('#camShot').onclick = () => $('#camFile').click();
+    return;
+  }
+  try {
+    if (!camStream) camStream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    const stream = camStream;
+    if (state.view !== 'scan' || state.scan?.step !== 'camera') { stopCamera(); return; }
+    if (!video.isConnected || !stream) return;                 // Seite wurde inzwischen neu aufgebaut
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    if (!video.isConnected) return;
+    msg.hidden = true;
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.torch) {
+      const t = $('#camTorch'); t.hidden = false; let on = false;
+      t.onclick = () => { on = !on; track.applyConstraints({ advanced: [{ torch: on }] }).catch(() => {}); t.classList.toggle('on', on); };
+    }
+  } catch (e) {
+    console.warn(e);
+    if (!video.isConnected) return;
+    stopCamera();
+    msg.hidden = false;
+    msg.innerHTML = e.name === 'NotAllowedError'
+      ? 'Kein Kamerazugriff. iPhone: <b>Einstellungen → Apps → Safari → Kamera → Fragen/Erlauben</b>, dann App neu öffnen.<br>Oder Auslöser antippen, um die iPhone-Kamera zu nutzen.'
+      : 'Kamera nicht verfügbar – Auslöser öffnet die iPhone-Kamera.';
+    $('#camShot').onclick = () => $('#camFile').click();
+  }
+}
+function addShot(src, w, h) {
+  const sc = state.scan;
+  const c = document.createElement('canvas');
+  const scale = Math.min(1, 2400 / Math.max(w, h));                // reicht für Bon-Text, spart Speicher
+  c.width = Math.round(w * scale); c.height = Math.round(h * scale);
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  const t = document.createElement('canvas'); t.width = 120; t.height = Math.round(120 * c.height / c.width);
+  t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
+  c.thumb = t.toDataURL('image/jpeg', 0.6);
+  sc.shots.push(c); sc.err = ''; sc.stamp++;
+  if (navigator.vibrate) navigator.vibrate(20);
+  render();
+}
+function takeShot() {
+  const video = $('#camVideo');
+  if (!video || !video.videoWidth) { $('#camFile').click(); return; }
+  $('#camWrap').classList.add('flash'); setTimeout(() => $('#camWrap') && $('#camWrap').classList.remove('flash'), 150);
+  addShot(video, video.videoWidth, video.videoHeight);
+}
+function fileShot(file) {
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => { addShot(img, img.naturalWidth, img.naturalHeight); URL.revokeObjectURL(img.src); };
+  img.src = URL.createObjectURL(file);
+}
+function busy(text, p) {
+  const b = $('#scanBusy'); if (!b) return;
+  b.hidden = false; $('#busyTxt').textContent = text;
+  $('#busyBar').style.width = Math.round((p || 0) * 100) + '%';
+}
+function aiPrompt() {
+  const list = active().map(i => `${i.id} | ${plain(i.name)} | ${i.category || ''} | ${isDrink(i) && i.sizeL ? fmt(i.sizeL, 3) + ' L' : 'Stück'}${bigSize(i) ? ' | ' + bigSize(i) + ' pro ' + (isDrink(i) ? 'Kasten' : 'Packung') : ''}`).join('\n');
+  return `Du liest einen deutschen Kassenbon (Aldi, Lidl, Kaufland, Getränkemarkt …). Die Fotos sind Abschnitte desselben Bons von oben nach unten; überlappende Zeilen nur einmal zählen.
+Liste alle gekauften Positionen. Ignoriere Pfand, Leergut, Rabatte, Coupons, Summen, Steuer-, Zahlungs- und Kopfzeilen.
+Ordne jede Position einem Artikel aus dieser Liste zu (Feld artikelId), wenn sie eindeutig dazu passt, sonst artikelId null:
+id | Name | Kategorie | Standardgröße | Gebinde
+${list}
+anzahl = gekaufte Menge laut Bon (z. B. "2 x" → 2). gebinde = Flaschen pro Packung/Kasten dieser Position (z. B. "20x0,5" → 20, einzelne Flasche → 1). groesseL = Liter pro Flasche, falls erkennbar, sonst null. sicher = false, wenn die Zuordnung unsicher ist.
+Antworte nur mit JSON in genau dieser Form:
+{"bontext":"kompletter Bon-Text zeilenweise","positionen":[{"zeile":"Text wie auf dem Bon","artikelId":"id oder null","anzahl":1,"gebinde":1,"groesseL":0.5,"sicher":true}]}`;
+}
+const toB64 = (c) => { const x = document.createElement('canvas'); const s = Math.min(1, 1600 / Math.max(c.width, c.height));
+  x.width = Math.round(c.width * s); x.height = Math.round(c.height * s); x.getContext('2d').drawImage(c, 0, 0, x.width, x.height);
+  return x.toDataURL('image/jpeg', 0.8).split(',')[1]; };
+
+async function analyzeScan(engine) {
+  const sc = state.scan;
+  if (!sc.shots.length) return;
+  v_lock(true);
+  try {
+    let rows, note = '';
+    if (engine === 'ai') {
+      busy('KI liest den Bon …', 0.3);
+      try {
+        const res = await backend.aiReadReceipt(sc.shots.map(toB64), aiPrompt());
+        sc.text = res.text || '';
+        rows = rowsFromAi(res.positionen, active(), state.aliases);
+        if (!rows.length) throw new Error('KI hat keine Positionen gefunden.');
+      } catch (e) {
+        console.warn('KI fehlgeschlagen, werte offline aus:', e);
+        note = (e.message || 'KI-Fehler') + ' – wurde offline ausgewertet.';
+        engine = 'offline';
+      }
+    }
+    if (engine === 'offline') {
+      const texts = DEMO ? await backend.demoOcr(sc.shots)
+        : await (await import('./ocr.js')).recognize(sc.shots, (t, p) => busy(t, p));
+      sc.text = mergeTexts(texts);
+      rows = parseReceipt(sc.text, active(), state.aliases);
+    }
+    if (!rows.length) throw new Error('Keine Artikel erkannt. Foto schärfer und heller aufnehmen' + (engine === 'offline' && backend.aiAvailable && backend.aiAvailable() ? ' oder „Mit KI“ versuchen.' : '.'));
     sc.rows = rows.map((r, i) => {
       const it = r.itemId ? getItem(r.itemId) : null;
       return { ...r, n: i, include: !!it, auto: r.itemId, parts: suggestParts(r, it) };
     });
-    sc.step = 'review'; sc.stamp++; render(); window.scrollTo(0, 0);
-  };
+    sc.engine = engine; sc.err = ''; sc.note = note; sc.step = 'review'; sc.stamp++;
+    render(); window.scrollTo(0, 0);
+  } catch (e) {
+    console.warn(e);
+    sc.err = e.message || String(e);
+    sc.stamp++; render();
+  } finally { v_lock(false); }
 }
+function v_lock(on) { document.body.classList.toggle('scan-busy', on); }
+
 function itemOptions(sel) {
   let h = `<option value="">– nicht übernehmen –</option>`;
   for (const [cat, its] of groupByCat(active())) {
@@ -1038,15 +1164,16 @@ function renderScanReview(v) {
   const sc = state.scan;
   const matched = sc.rows.filter(r => r.itemId), open = sc.rows.filter(r => !r.itemId);
   const nCheck = matched.filter(r => r.conf === 'check' && r.itemId === r.auto).length;
-  v.innerHTML = buyModeSwitch('scan') + `
-    <div class="scan-steps"><span class="done" id="scanBack" role="button">1 Text holen ✓</span><span class="on">2 Prüfen</span><span>3 Buchen</span></div>
+  v.innerHTML = buyModeSwitch('scan') + stepsBar(2) + `
     <div class="count-head">
+      ${sc.note ? `<p class="banner warn-banner">${esc(sc.note)}</p>` : ''}
       <p class="hint">${matched.length} Artikel erkannt${nCheck ? `, davon <b class="warn">${nCheck} bitte prüfen</b>` : ''}. Artikel und Mengen kontrollieren, Häkchen weg = wird nicht gebucht.</p>
     </div>
     <div id="scanMatched">${matched.map(scanRowHtml).join('') || '<p class="hint">Nichts automatisch erkannt – unten zuordnen.</p>'}</div>
     <button class="btn" type="button" id="scanAdd">+ Artikel hinzufügen</button>
     ${open.length ? `<h2 class="cat">Nicht zugeordnet (${open.length})</h2><p class="hint">Gehört eine Zeile zu einem Artikel? Auswählen – die App merkt es sich für den nächsten Bon.</p>
       <div id="scanOpen">${open.map(scanRowHtml).join('')}</div>` : ''}
+    <details class="scan-text"><summary>Erkannter Text (${sc.engine === 'ai' ? 'KI' : 'offline'})</summary><pre>${esc(sc.text || '–')}</pre></details>
     <button class="btn link" type="button" id="scanNew">Bon verwerfen und neu beginnen</button>
     <div class="buy-bar"><span id="scanSum"></span><button class="btn primary" type="button" id="scanBook">Einkauf buchen</button></div>`;
   v.querySelectorAll('.scan-row').forEach(el => {
@@ -1069,7 +1196,7 @@ function renderScanReview(v) {
       updateScanSum();
     });
   });
-  $('#scanBack').onclick = () => { sc.step = 'input'; sc.stamp++; render(); };
+  $('#scanBack').onclick = () => { sc.step = 'camera'; sc.stamp++; render(); };
   $('#scanAdd').onclick = () => {
     sc.rows.push({ n: sc.rows.length, raw: '', key: '', manual: true, itemId: null, include: false, conf: 'user', qty: 1, parts: { big: 0, small: 0, alt: {} } });
     sc.stamp++; render();
@@ -1390,7 +1517,7 @@ const HINTS = {
   list: '<b>Einkaufsliste:</b> Hier steht automatisch alles unter Mindestbestand, mit Mengenvorschlag. Beim Einkaufen abhaken, danach <b>Als Einkauf buchen</b>. <b>Teilen</b> schickt die Liste z. B. per WhatsApp.',
   items: '<b>Artikel:</b> Neue Artikel anlegen, Mindestbestände und Flaschengrößen festlegen. Artikel antippen zum Bearbeiten oder Archivieren.',
   stats: '<b>Statistik (Beta):</b> Verbrauch pro Woche, Monat und Party. Für die Party-Auswertung vor und nach der Party unter Bestand → 📋 Zählen mit „Vor Party“ bzw. „Nach Party“ zählen.',
-  scan: '<b>Bon scannen:</b> Text vom Kassenbon ins Feld holen (Anleitung unten), dann <b>Auswerten</b>. Danach prüfst du jede Zeile, bevor gebucht wird. Was du einmal zuordnest, erkennt die App beim nächsten Bon automatisch.',
+  scan: '<b>Bon scannen:</b> Bon flach hinlegen, in den Rahmen halten und auslösen – lange Bons in mehreren Abschnitten. Dann auswerten und jede Zeile prüfen, bevor gebucht wird. Was du einmal zuordnest, erkennt die App beim nächsten Bon automatisch.',
   count: '<b>Bestandsaufnahme:</b> Alles ist mit dem erwarteten Bestand vorausgefüllt. Nur ändern, was nicht stimmt: Feld antippen, gezählte Zahl tippen. Rechts siehst du die Abweichung. Zum Schluss <b>Speichern</b>.'
 };
 function hint(key) {

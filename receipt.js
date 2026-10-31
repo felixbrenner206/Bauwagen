@@ -176,3 +176,45 @@ export function suggestParts(line, item) {
   if (per > 0) { parts.big = Math.floor(count / per); parts.small = count % per; } else parts.small = count;
   return parts;
 }
+
+// Mehrere Fotos eines langen Bons zusammensetzen: Zeilen, die am Ende von Foto n und am Anfang
+// von Foto n+1 doppelt vorkommen (Überlappung), nur einmal übernehmen. Vergleich unscharf (OCR-Fehler).
+const lineEq = (a, b) => {
+  const x = normalize(a), y = normalize(b);
+  if (!x || !y) return x === y;
+  return x === y || (Math.min(x.length, y.length) >= 6 && 1 - lev(x, y) / Math.max(x.length, y.length) >= 0.85);
+};
+export function mergeTexts(texts) {
+  let acc = [];
+  for (const t of texts) {
+    const lines = String(t || '').split(/\r?\n/).filter(l => l.trim());
+    let best = 0;
+    for (let k = Math.min(acc.length, lines.length, 15); k >= 1; k--) {
+      let ok = true;
+      for (let j = 0; j < k; j++) if (!lineEq(acc[acc.length - k + j], lines[j])) { ok = false; break; }
+      if (ok) { best = k; break; }
+    }
+    acc = acc.concat(lines.slice(best));
+  }
+  return acc.join('\n');
+}
+
+// Ergebnis der KI (Positionen) in dasselbe Zeilenformat bringen wie parseReceipt
+// pos: [{ zeile, artikelId, anzahl, gebinde, groesseL, sicher }]
+export function rowsFromAi(pos, items, aliases = {}) {
+  const ids = new Set(items.map(i => i.id));
+  return (Array.isArray(pos) ? pos : []).filter(p => p && (p.zeile || p.artikelId)).map(p => {
+    const raw = String(p.zeile || '').slice(0, 120);
+    const key = aliasKey(raw);
+    const al = aliases[key];
+    let itemId = p.artikelId && ids.has(p.artikelId) ? p.artikelId : null;
+    let conf = itemId ? (p.sicher === false ? 'check' : 'sure') : 'none';
+    let alias = null;
+    if (al && al.id === '-') { itemId = null; conf = 'none'; }
+    else if (al && ids.has(al.id)) { itemId = al.id; conf = 'sure'; alias = al; }
+    const qty = Math.max(1, Math.round(Number(p.anzahl) || 1));
+    const pack = Number(p.gebinde) > 1 ? Math.round(Number(p.gebinde)) : null;
+    const size = Number(p.groesseL) > 0 && Number(p.groesseL) <= 10 ? Number(p.groesseL) : null;
+    return { raw, name: raw, key, qty, pack, size, isCase: false, total: null, itemId, conf, alias, alts: itemId ? [itemId] : [] };
+  });
+}

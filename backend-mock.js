@@ -139,6 +139,29 @@ export function saveAliases(partial) {
   const m = readMeta(); m.aliases = { ...(m.aliases || {}), ...partial };
   localStorage.setItem(MKEY, JSON.stringify(m)); aliasCb && aliasCb(m.aliases);
 }
+// ---------- Demo: Bonerkennung ohne echte Kamera-Auswertung ----------
+// Liefert einen Beispielbon pro Foto, damit man den Ablauf ausprobieren kann.
+const DEMO_BONS = [
+  'KAUFLAND\n     2 x      9,49\nOETT. HELLES 20X0,5        18,98 A\nPFAND KISTE                 6,20 A\n     2 x      3,10',
+  '     2 x      3,10\nRADLER ZITRONE 0,5L         0,79 A\nKLOPFER FEIGLING 25X0,02    9,99 A\nZITRONEN                    1,29 B\nSUMME                      37,25'
+];
+export async function demoOcr(canvases) {
+  await new Promise(r => setTimeout(r, 300));
+  return canvases.map((_, i) => DEMO_BONS[i % DEMO_BONS.length]);
+}
+export const aiAvailable = () => true;
+export async function aiReadReceipt(images) {
+  if (!online) throw new Error('Für die KI-Erkennung wird Internet gebraucht.');
+  await new Promise(r => setTimeout(r, 300));
+  if (localStorage.getItem('bwz.demo.aiFail')) throw new Error('KI-Kontingent erschöpft.');   // Testschalter
+  const id = (n) => (s.items.find(i => i.name === n) || {}).id || null;
+  return { text: DEMO_BONS.join('\n'), positionen: [
+    { zeile: 'OETT. HELLES 20X0,5', artikelId: id('Helles'), anzahl: 2, gebinde: 20, groesseL: 0.5, sicher: true },
+    { zeile: 'RADLER ZITRONE 0,5L', artikelId: id('Radler'), anzahl: 1, gebinde: 1, groesseL: 0.5, sicher: true },
+    { zeile: 'KLOPFER FEIGLING 25X0,02', artikelId: id('Klopfer'), anzahl: 1, gebinde: 25, groesseL: 0.02, sicher: false },
+    { zeile: 'ZITRONEN', artikelId: null, anzahl: 1 }
+  ].slice(0, images.length >= 2 ? 4 : 1) };
+}
 export function logPush(msg) {
   const log = JSON.parse(localStorage.getItem('bwz.demo.pushlog') || '[]');
   log.push({ ...msg, ts: Date.now() }); localStorage.setItem('bwz.demo.pushlog', JSON.stringify(log));

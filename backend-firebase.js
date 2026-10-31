@@ -12,7 +12,7 @@ import {
   collection, doc, onSnapshot, query, where, orderBy, limit,
   writeBatch, increment, serverTimestamp, setDoc, updateDoc, getDocFromServer, runTransaction, getDocs
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
-import { firebaseConfig } from './config.js';
+import { firebaseConfig, aiConfig } from './config.js';
 
 export const name = 'firebase';
 export const configured = !String(firebaseConfig.apiKey).includes('HIER_EINTRAGEN');
@@ -237,4 +237,51 @@ export function saveAliases(partial) {
   if (!Object.keys(partial).length) return;
   setDoc(doc(db, 'meta', 'aliases'), { map: partial }, { merge: true })
     .catch(err => console.warn('Zuordnungen nicht gespeichert', err));
+}
+
+// ---------- KI-Bonerkennung (Firebase AI Logic + App Check) ----------
+// Wird erst beim ersten Gebrauch geladen, damit der normale App-Start offline bleibt.
+const FBV = '12.19.0';
+export const aiAvailable = () => !!(aiConfig && aiConfig.recaptchaKey);
+let aiInst = null, aiModelIdx = 0;
+async function getAi() {
+  if (aiInst) return aiInst;
+  const [{ initializeAppCheck, ReCaptchaEnterpriseProvider }, aiMod] = await Promise.all([
+    import(`https://www.gstatic.com/firebasejs/${FBV}/firebase-app-check.js`),
+    import(`https://www.gstatic.com/firebasejs/${FBV}/firebase-ai.js`)
+  ]);
+  initializeAppCheck(app, { provider: new ReCaptchaEnterpriseProvider(aiConfig.recaptchaKey), isTokenAutoRefreshEnabled: true });
+  const ai = aiMod.getAI(app, { backend: new aiMod.GoogleAIBackend(), useLimitedUseAppCheckTokens: true });
+  aiInst = { ai, getGenerativeModel: aiMod.getGenerativeModel };
+  return aiInst;
+}
+const MODELS = () => (aiConfig.models && aiConfig.models.length ? aiConfig.models : [aiConfig.model || 'gemini-3.8-flash']);
+const notFound = (m) => /not.?found|404|unsupported model|is not supported|does not exist/i.test(m);
+// images: JPEG als Base64 (ohne data:-Präfix); prompt: fertiger Auftragstext → Array von Positionen
+export async function aiReadReceipt(images, prompt) {
+  if (!navigator.onLine) throw new Error('Für die KI-Erkennung wird Internet gebraucht.');
+  let inst;
+  try { inst = await getAi(); }
+  catch (e) { aiInst = null; throw new Error('KI konnte nicht geladen werden: ' + (e.code || e.message)); }
+  const parts = [prompt, ...images.map(data => ({ inlineData: { data, mimeType: 'image/jpeg' } }))];
+  const list = MODELS();
+  for (; aiModelIdx < list.length; aiModelIdx++) {          // gemerkt: funktionierendes Modell wird beim nächsten Mal direkt genommen
+    const model = inst.getGenerativeModel(inst.ai, { model: list[aiModelIdx], generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    try {
+      const res = await model.generateContent(parts);
+      const txt = res.response.text();
+      const j = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+      return { positionen: j.positionen || [], text: j.bontext || '', model: list[aiModelIdx] };
+    } catch (e) {
+      const msg = String(e.code || '') + ' ' + String(e.message || e);
+      if (notFound(msg) && aiModelIdx < list.length - 1) { console.warn('Modell nicht verfügbar:', list[aiModelIdx]); continue; }
+      if (/app-check|appcheck|403|permission/i.test(msg)) throw new Error('KI abgelehnt (App Check). Einrichtung prüfen – siehe Anleitung.');
+      if (/429|quota|resource.?exhausted/i.test(msg)) throw new Error('KI-Kontingent erschöpft.');
+      if (/billing|free tier|paid/i.test(msg)) throw new Error('KI braucht den Blaze-Tarif (Abrechnungskonto).');
+      if (e instanceof SyntaxError) throw new Error('KI-Antwort unlesbar.');
+      throw new Error('KI-Fehler: ' + msg.trim().slice(0, 120));
+    }
+  }
+  aiModelIdx = 0;
+  throw new Error('Kein KI-Modell verfügbar – Modellliste in config.js prüfen.');
 }

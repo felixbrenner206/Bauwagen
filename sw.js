@@ -2,11 +2,12 @@
 // Eigene Dateien: "stale-while-revalidate" → sofort aus dem Cache, im Hintergrund aktualisieren
 //   (neue Version ist beim übernächsten Öffnen aktiv). Bei jedem Update VERSION hochzählen.
 // Firebase-Bibliothek (gstatic.com): cache-first, die Dateien sind versioniert und ändern sich nie.
-const VERSION = 'bwz-v10';
+const VERSION = 'bwz-v12';
 const FB = '12.19.0';
+const OCR_CACHE = 'bwz-ocr-1';   // eigener Cache, bleibt bei App-Updates erhalten (~10 MB nicht jedes Mal neu laden)
 const SHELL = [
   './', './index.html', './style.css', './app.js', './config.js',
-  './backend-firebase.js', './backend-mock.js', './import-data.js', './receipt.js', './manifest.webmanifest',
+  './backend-firebase.js', './backend-mock.js', './import-data.js', './receipt.js', './ocr.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png'
 ];
 const FIREBASE = ['app', 'auth', 'firestore'].map(m => `https://www.gstatic.com/firebasejs/${FB}/firebase-${m}.js`);
@@ -23,7 +24,7 @@ self.addEventListener('install', (e) => {
 
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
-    for (const k of await caches.keys()) if (k !== VERSION) await caches.delete(k);
+    for (const k of await caches.keys()) if (k !== VERSION && k !== OCR_CACHE) await caches.delete(k);
     await self.clients.claim();
   })());
 });
@@ -45,7 +46,22 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  if (url.origin !== self.location.origin) return;   // Firestore/Auth-Verkehr nicht anfassen
+  // Offline-Texterkennung (Tesseract: Programm, Kern, deutsche Sprachdaten) – versioniert, ändert sich nie
+  const isOcr = (url.hostname === 'cdn.jsdelivr.net' && /^\/npm\/(tesseract|@tesseract\.js-data)/.test(url.pathname))
+    || url.hostname === 'tessdata.projectnaptha.com';
+  if (isOcr) {
+    e.respondWith((async () => {
+      const c = await caches.open(OCR_CACHE);
+      const hit = await c.match(req);
+      if (hit) return hit;
+      const res = await fetch(req);
+      if (res.ok) c.put(req, res.clone());
+      return res;
+    })());
+    return;
+  }
+
+  if (url.origin !== self.location.origin) return;   // Firestore/Auth/KI-Verkehr nicht anfassen
 
   e.respondWith((async () => {
     const c = await caches.open(VERSION);

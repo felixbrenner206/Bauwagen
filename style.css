@@ -293,3 +293,38 @@ textarea { font: inherit; font-size: 15px; font-family: ui-monospace, SFMono-Reg
 .scan-steps span.on { background: var(--accent); color: var(--accent-text); }
 .scan-steps span.done { color: var(--ok); cursor: pointer; }
 #scanClear, #scanNew { width: 100%; margin-top: 4px; }
+
+/* Kamera-Scan */
+.cam-wrap { position: relative; margin-top: 10px; border-radius: 16px; overflow: hidden; background: #000; aspect-ratio: 3 / 4; max-height: 62vh; width: 100%; }
+.cam-wrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cam-wrap.flash::after { content: ""; position: absolute; inset: 0; background: #fff; opacity: .7; }
+.cam-frame { position: absolute; inset: 6% 10% 18% 10%; border: 2px dashed rgba(255,255,255,.8); border-radius: 10px; display: flex; align-items: flex-start; justify-content: center; pointer-events: none; }
+.cam-frame span { margin-top: 8px; padding: 4px 10px; border-radius: 999px; background: rgba(0,0,0,.55); color: #fff; font-size: 12px; text-align: center; max-width: 90%; }
+.cam-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px; color: #fff; font-size: 14px; line-height: 1.5; background: rgba(0,0,0,.6); }
+.cam-msg[hidden] { display: none; }
+.cam-shutter { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); width: 68px; height: 68px; border-radius: 50%; background: #fff; border: 5px solid rgba(255,255,255,.45); background-clip: padding-box; box-shadow: 0 2px 10px rgba(0,0,0,.4); }
+.cam-shutter:active { transform: translateX(-50%) scale(.92); }
+.cam-shutter:disabled { opacity: .4; }
+.cam-torch { position: absolute; right: 12px; bottom: 24px; width: 46px; height: 46px; border-radius: 50%; background: rgba(0,0,0,.5); font-size: 20px; }
+.cam-torch.on { background: #ffd34d; }
+.shots { display: flex; gap: 8px; overflow-x: auto; margin-top: 10px; }
+.shots:empty { display: none; }
+.shot { position: relative; flex: none; width: 64px; height: 86px; border-radius: 8px; overflow: hidden; border: 2px solid var(--accent); }
+.shot img { width: 100%; height: 100%; object-fit: cover; }
+.shot button { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; border-radius: 50%; background: rgba(0,0,0,.65); color: #fff; font-size: 11px; }
+.shot b { position: absolute; left: 4px; bottom: 2px; color: #fff; font-size: 12px; text-shadow: 0 1px 2px #000; }
+.hint.small { font-size: 12px; }
+.busy { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.busy[hidden] { display: none; }
+.busy-box { background: var(--card); color: var(--text); border-radius: 16px; padding: 18px; width: 100%; max-width: 320px; display: grid; gap: 12px; text-align: center; }
+.bar { height: 8px; border-radius: 4px; background: var(--btn); overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+body.scan-busy .busy { display: flex; }
+.scan-text { margin-top: 8px; }
+.scan-text summary { color: var(--muted); font-size: 13px; padding: 6px 0; cursor: pointer; }
+.scan-text pre { white-space: pre-wrap; font-size: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px; max-height: 260px; overflow: auto; margin: 0; }
+
+.scan-links { display: flex; flex-direction: column; gap: 0; }
+.scan-links .btn.link { padding: 8px; }
+.warn-banner { margin: 8px 0 0; background: color-mix(in srgb, #d9a400 18%, var(--card)); font-size: 14px; }
+#scanGo { margin-top: 12px; }

@@ -12,3 +12,15 @@ export const firebaseConfig = {
   messagingSenderId: "920415377038",
   appId: "1:920415377038:web:5441f206266e683e3c5bdf"
 };
+
+// ============================================================
+//  KI-Bonerkennung (Firebase AI Logic, Gemini) – Einrichtung siehe EINRICHTUNG.md, Abschnitt 6
+//  Voraussetzung: Firebase-Tarif Blaze (in der EU ist die kostenlose Gemini-Stufe für Apps nicht erlaubt).
+//  recaptchaKey: Schlüssel-ID von reCAPTCHA (für Firebase App Check). Leer = KI aus → nur Offline-Erkennung.
+//  Auch dieser Schlüssel ist nicht geheim; geschützt wird über App Check + Domain-Beschränkung.
+//  models: werden der Reihe nach probiert, falls ein Modellname nicht (mehr) existiert.
+// ============================================================
+export const aiConfig = {
+  recaptchaKey: "",
+  models: ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
+};
